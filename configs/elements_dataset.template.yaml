@@ -1,0 +1,12 @@
+# Copy this file to configs/elements_dataset.yaml after exporting from Roboflow.
+path: data/roboflow/facade-elements
+train: train/images
+val: valid/images
+test: test/images
+
+# Replace these with the real Roboflow classes.
+names:
+  0: window_type_a
+  1: panel_type_b
+  2: door
+  3: balcony_railing
