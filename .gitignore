@@ -1,0 +1,22 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# Large local artifacts
+data/raw/
+data/roboflow/
+outputs/
+*.pt
+*.onnx
+*.engine
+*.mlpackage
+
+# Keep folder anchors
+!data/raw/.gitkeep
+!data/roboflow/.gitkeep
+!outputs/.gitkeep
+!outputs/runs/.gitkeep
+!outputs/reports/.gitkeep
