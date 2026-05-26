@@ -1,0 +1,24 @@
+path: data/roboflow/gtu-mimari-lejant
+train: train/images
+val: valid/images
+test: test/images
+
+nc: 17
+names:
+  0: ahsap_dograma
+  1: ahsap_kaplamali_ahsap_karkas_duvar
+  2: ahsap_tasiyici
+  3: alaturka_kiremit
+  4: cam
+  5: camur_harc
+  6: cimento_esasli_siva
+  7: delikli_tugla
+  8: demir
+  9: dogal_tas_duvar_harcli
+  10: harman_tuglasi
+  11: kirec_badana
+  12: kirec_esasli_siva
+  13: kirec_harc
+  14: marsilya_tipi_kiremit
+  15: toprak_siva
+  16: tugla_duvar
