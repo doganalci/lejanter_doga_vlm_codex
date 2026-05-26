@@ -34,6 +34,10 @@ Runtime -> Change runtime type -> GPU
 GPU preference: A100 > L4 > T4
 ```
 
+## Technical Report
+
+See [docs/technical_report.md](docs/technical_report.md) for the detailed method report, training plan, expected durations, metric definitions, and evaluation checklist.
+
 ## Data
 
 Export Roboflow datasets in YOLO format:
