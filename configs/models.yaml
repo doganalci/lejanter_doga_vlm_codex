@@ -1,0 +1,19 @@
+# Conservative starting points. Use nano/small first to validate data and labels,
+# then move up when the pipeline is stable.
+facade_segmentation:
+  task: segment
+  model: yolo11n-seg.pt
+  epochs: 80
+  imgsz: 1024
+
+element_detection:
+  task: detect
+  model: yolo11s.pt
+  epochs: 100
+  imgsz: 1024
+
+element_segmentation:
+  task: segment
+  model: yolo11s-seg.pt
+  epochs: 100
+  imgsz: 1024
