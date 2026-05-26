@@ -41,6 +41,16 @@ cp configs/elements_dataset.template.yaml configs/elements_dataset.yaml
 
 Recommended first labeling rule: use one class, `facade_region`, and label each visible facade plane as a separate instance.
 
+Current local dataset:
+
+```text
+data/roboflow/gtu-mimari-lejant
+  train: 42 images
+  valid: 5 images
+  test: 5 images
+  classes: 17
+```
+
 ## Train
 
 Facade segmentation:
