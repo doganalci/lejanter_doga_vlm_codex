@@ -25,6 +25,15 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+## Colab
+
+Use [notebooks/train_colab.ipynb](notebooks/train_colab.ipynb) for the first GPU baseline. In Colab, choose:
+
+```text
+Runtime -> Change runtime type -> GPU
+GPU preference: A100 > L4 > T4
+```
+
 ## Data
 
 Export Roboflow datasets in YOLO format:
