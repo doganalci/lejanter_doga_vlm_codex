@@ -1,0 +1,11 @@
+# Copy this file to configs/facade_dataset.yaml after exporting from Roboflow.
+# For Ultralytics, path should point at a YOLO dataset folder containing
+# train/valid/test image+label folders, or train/val/test entries below.
+path: data/roboflow/facade-segmentation
+train: train/images
+val: valid/images
+test: test/images
+
+# Start simple: one facade-region class, each visible facade plane as a separate instance.
+names:
+  0: facade_region
