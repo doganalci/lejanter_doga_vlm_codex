@@ -382,34 +382,29 @@ outputs/runs/infer-elements-test/
 
 ## 10. Raporlanacak Gercek Egitim Sonuclari
 
-Egitim tamamlandiktan sonra bu bolum doldurulacak.
+Egitim tamamlanmistir. Uc YOLO11s segmentation deneyi kosulmustur:
 
 ```text
-Calistirilan ortam:
-GPU:
-Model:
-Epoch:
-Image size:
-Batch:
-Toplam egitim suresi:
-
-Final Precision:
-Final Recall:
-Final Box mAP50:
-Final Box mAP50-95:
-Final Mask mAP50:
-Final Mask mAP50-95:
-En iyi epoch:
+v1: elements-seg-v1
+v2: elements-seg-v2-aug-controlled
+v3: elements-seg-v3-no-erasing
 ```
 
-Sinif bazli gozlemler:
+Detayli tablo ve makale icin saklanacak notlar:
 
 ```text
-En iyi ayristirilan siniflar:
-Karisan siniflar:
-Eksik yakalanan siniflar:
-Etiket kalitesi iyilestirme notlari:
+docs/yolo_experiment_results.md
 ```
+
+Ozet sonuc:
+
+| Run | Box P | Box R | Box mAP50 | Box mAP50-95 | Mask P | Mask R | Mask mAP50 | Mask mAP50-95 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| v1 default | 0.384 | 0.255 | 0.326 | 0.188 | 0.358 | 0.230 | 0.294 | 0.0774 |
+| v2 controlled aug | 0.593 | 0.191 | 0.280 | 0.145 | 0.519 | 0.195 | 0.258 | 0.0678 |
+| v3 no erasing | 0.152 | 0.395 | 0.329 | 0.145 | 0.152 | 0.380 | 0.309 | 0.100 |
+
+Mevcut calisma modeli `elements-seg-v3-no-erasing/weights/best.pt` olarak secilmistir. Bu model en yuksek mask recall ve mask mAP degerlerini vermistir; ancak precision dusuk oldugu icin inference asamasinda confidence threshold ayari yapilmalidir.
 
 ## 11. Degistirdigimiz / Karar Verdiginiz Noktalar
 
@@ -503,7 +498,7 @@ Sag cephede 8 tugla_duvar ve 2 dogal_tas_duvar_harcli alan tespit edildi.
 - Dataset kucuk oldugu icin model overfit olabilir.
 - Valid/test setleri sadece 5'er goruntu oldugu icin metrikler oynak olabilir.
 - Bazi siniflar gorsel olarak birbirine yakin oldugundan confusion matrix dikkatle incelenmelidir.
-- Dosya adlarinda Turkce karakterler Colab/Linux ortaminda sorun cikarmazsa devam edilebilir; sorun cikarsa Roboflow export adlari sadeleştirilebilir.
+- Dosya adlarinda Turkce karakterler Colab/Linux ortaminda sorun cikarmazsa devam edilebilir; sorun cikarsa Roboflow export adlari sadelestirilebilir.
 - Mimari rapor katmaninda sayilar model JSON'undan gelmeli, LLM'in sayi uydurmasina izin verilmemelidir.
 
 ## 15. Ozet
