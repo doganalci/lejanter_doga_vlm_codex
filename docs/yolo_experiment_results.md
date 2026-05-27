@@ -8,6 +8,22 @@ Model dosyalari GitHub'a eklenmemistir. Tum agirliklar ve egitim ciktisi asagida
 /Users/doganalci/Downloads/gtu_yolo_models_and_results.zip
 ```
 
+Ayrica kalici Colab kullanimi icin Google Drive klasor yapisi kullanilmaktadir:
+
+```text
+Google Drive shared folder
+  dataset/  -> GTU_MIMARI_LEJANT.yolov11.zip
+  weights/  -> elements-seg-v1/v2/v3 best.pt dosyalari
+  test/     -> dis test gorselleri
+  reports/  -> egitim metrikleri, configler, epoch sonuclari ve test gorselleri
+```
+
+Paylasilan klasor:
+
+```text
+https://drive.google.com/drive/folders/1vmSSPsnu4fVBkM0yn1ScU7DFgDXyOksa
+```
+
 Zip icerigi:
 
 ```text
