@@ -144,6 +144,23 @@ Onerilen sira:
 5. Ayni 5 test gorselinde gorsel ve metrik karsilastirma yap.
 ```
 
+Colab uygulamasi:
+
+```text
+4D -> Drive test gorsellerinde YOLO v1/v2/v3 karsilastirmasi
+4E -> SAM2 kurulumu ve sam2.1_hiera_tiny checkpoint indirme
+4F -> v3 YOLO bbox ciktisini SAM2 mask refinement icin kullanma
+9  -> YOLO ve SAM2 ciktilarini Drive reports klasorune kopyalama
+```
+
+SAM2 refinement script:
+
+```text
+scripts/refine_with_sam2.py
+```
+
+Bu script `scripts/infer_yolo.py` ile uretilen JSON icindeki `bbox_xyxy` alanlarini SAM2 box prompt olarak kullanir. Sinif ve confidence YOLO'dan korunur; `sam2_polygons`, `sam2_score` ve SAM2 overlay gorselleri eklenir.
+
 ## 6. Beklenti
 
 En guvenilir uretim hatti muhtemelen:
