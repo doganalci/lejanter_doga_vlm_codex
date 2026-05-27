@@ -16,6 +16,8 @@ Bu nedenle ilk asamada dogrudan VLM fine-tuning yapmak yerine, olculebilir ve de
 
 Veri Roboflow uzerinde etiketlenmis instance segmentation dataset'inden alinmistir.
 
+Export bilgisi:
+
 ```text
 Format: YOLOv11
 Task: Instance Segmentation
@@ -24,6 +26,8 @@ Yerel klasor: data/roboflow/gtu-mimari-lejant
 ```
 
 Roboflow export paketinde yalnizca `train` split'i geldigi icin repo icinde `scripts/split_yolo_dataset.py` ile lokal train/valid/test ayrimi yapilmistir.
+
+Son split:
 
 ```text
 Toplam goruntu: 52
@@ -55,7 +59,11 @@ Siniflar:
 16 tugla_duvar
 ```
 
-Kullanilan dataset config dosyasi: `configs/elements_dataset.yaml`.
+Kullanilan dataset config dosyasi:
+
+```text
+configs/elements_dataset.yaml
+```
 
 ## 3. Kullanilan Yontem
 
@@ -75,7 +83,7 @@ YOLO segmentation secilme nedenleri:
 
 VLM fine-tuning daha pahali, daha karmasik ve dogrulugu daha zor olculen bir yoldur. Bu projede ilk hedef sayilabilir, denetlenebilir ve geometrik olarak kontrol edilebilir tespitler uretmektir.
 
-Kurulan mimari:
+Bu nedenle mimari:
 
 ```text
 Roboflow labels
@@ -85,9 +93,13 @@ Roboflow labels
   -> LLM veya VLM ile teknik rapor
 ```
 
+seklinde kurulmustur.
+
 VLM/LLM katmani modelin yerine gecmez; model ciktisini mimari dile ceviren raporlama katmani olarak konumlandirilir.
 
 ## 4. Repo Icerisinde Yapilanlar
+
+### 4.1 Proje Iskeleti
 
 Olusturulan ana klasorler:
 
@@ -102,13 +114,19 @@ outputs/
 
 `data/` ve `outputs/` altindaki buyuk veri/model dosyalari GitHub'a alinmamistir. Bu dosyalar `.gitignore` ile disarida tutulur.
 
-### 4.1 Dataset Config
+### 4.2 Dataset Config
 
-`configs/elements_dataset.yaml` dosyasi gercek Roboflow siniflari ile hazirlanmistir. Bu dosya Ultralytics YOLO egitiminin hangi klasorlerden veri okuyacagini ve sinif id'lerinin hangi isimlere karsilik geldigini tanimlar.
+`configs/elements_dataset.yaml` dosyasi gercek Roboflow siniflari ile hazirlanmistir.
 
-### 4.2 Split Scripti
+Bu dosya Ultralytics YOLO egitiminin hangi klasorlerden veri okuyacagini ve sinif id'lerinin hangi isimlere karsilik geldigini tanimlar.
 
-Eklenen script: `scripts/split_yolo_dataset.py`
+### 4.3 Split Scripti
+
+Eklenen script:
+
+```text
+scripts/split_yolo_dataset.py
+```
 
 Gorevi:
 
@@ -126,9 +144,13 @@ python scripts/split_yolo_dataset.py \
   --test 0.1
 ```
 
-### 4.3 Egitim Scripti
+### 4.4 Egitim Scripti
 
-Eklenen script: `scripts/train_yolo.py`
+Eklenen script:
+
+```text
+scripts/train_yolo.py
+```
 
 Gorevi:
 
@@ -136,11 +158,21 @@ Gorevi:
 - Detection veya segmentation task'i ile egitim baslatir.
 - Run ciktilarini `outputs/runs/` altina yazar.
 
-Ilk baseline icin secilen model: `yolo11s-seg.pt`. Bu secim hiz ve kapasite arasinda dengeli oldugu icin yapilmistir. T4 GPU'da bellek sorunu olursa `yolo11n-seg.pt` ve daha dusuk `imgsz` denenebilir.
+Ilk baseline icin secilen model:
 
-### 4.4 Inference Scripti
+```text
+yolo11s-seg.pt
+```
 
-Eklenen script: `scripts/infer_yolo.py`
+Bu secim, hiz ve kapasite arasinda dengeli oldugu icin yapilmistir. T4 GPU'da bellek sorunu olursa `yolo11n-seg.pt` ve daha dusuk `imgsz` denenebilir.
+
+### 4.5 Inference Scripti
+
+Eklenen script:
+
+```text
+scripts/infer_yolo.py
+```
 
 Gorevi:
 
@@ -149,7 +181,7 @@ Gorevi:
 - Her goruntu icin sinif, confidence, bbox ve polygon ciktisini JSON'a yazar.
 - Istenirse gorsel overlay kaydeder.
 
-### 4.5 Raporlama Scriptleri
+### 4.6 Raporlama Scriptleri
 
 Eklenen scriptler:
 
@@ -158,25 +190,38 @@ scripts/report_from_detections.py
 scripts/report_with_vllm.py
 ```
 
-`report_from_detections.py` detection/segmentation JSON ciktisini okur, her siniftan kac adet tespit edildigini raporlar ve cephe maskesi eklendiginde elemanlari ilgili cepheye atayabilir.
+`report_from_detections.py`:
 
-`report_with_vllm.py` JSON ciktisini OpenAI-compatible vLLM endpoint'ine gonderir, Turkce mimari cephe lejant raporu uretir. Prompt icinde modelin sayi uydurmamasi ve sadece JSON verisini kullanmasi istenir.
+- Detection/segmentation JSON ciktisini okur.
+- Her siniftan kac adet tespit edildigini raporlar.
+- Cephe maskesi eklendiginde elemanlari ilgili cepheye atayabilir.
 
-### 4.6 Colab Notebook
+`report_with_vllm.py`:
 
-Eklenen notebook: `notebooks/train_colab.ipynb`
+- JSON ciktisini OpenAI-compatible vLLM endpoint'ine gonderir.
+- Turkce mimari cephe lejant raporu uretir.
+- Prompt icinde modelin sayi uydurmamasi ve sadece JSON verisini kullanmasi istenir.
+
+### 4.7 Colab Notebook
+
+Eklenen notebook:
+
+```text
+notebooks/train_colab.ipynb
+```
 
 Notebook akisi:
 
 1. GPU kontrolu.
 2. GitHub repo clone.
 3. Python dependency kurulumu.
-4. Roboflow zip upload.
+4. Roboflow zip upload veya Google Drive'dan zip kopyalama.
 5. Dataset unzip ve split kontrolu.
 6. YOLO segmentation egitimi.
-7. Test set inference.
-8. Overlay gorsellerini gosterme.
-9. Model ve sonuclari zip olarak indirme.
+7. Opsiyonel kontrollu augmentation deneyi.
+8. Test set inference.
+9. Overlay gorsellerini gosterme.
+10. Model ve sonuclari zip olarak indirme.
 
 Colab GPU tercih sirasi:
 
@@ -215,6 +260,8 @@ python scripts/train_yolo.py \
 ## 6. Egitim Suresi Beklentisi
 
 Gercek sure GPU turune, Colab yogunluguna, batch size'a ve image size'a gore degisir. Bu proje icin dataset kucuk oldugu icin ilk baseline makul surede tamamlanmalidir.
+
+Tahmini sureler:
 
 ```text
 A100, yolo11s-seg, imgsz 1024: yaklasik 10-25 dk
@@ -277,15 +324,28 @@ outputs/runs/elements-seg-v1/weights/best.pt
 outputs/runs/elements-seg-v1/weights/last.pt
 ```
 
-`results.csv` her epoch icin loss ve mAP degerlerini icerir. Final rapora gercek degerler buradan alinacaktir.
+`results.csv`:
 
-`results.png` loss ve metriklerin epoch boyunca nasil degistigini grafik olarak gosterir.
+- Her epoch icin loss ve mAP degerlerini icerir.
+- Final rapora gercek degerler buradan alinacaktir.
 
-`confusion_matrix.png` hangi siniflarin birbirine karistigini gosterir.
+`results.png`:
 
-`val_batch*_pred.jpg` validation goruntulerinde model tahminlerini gosterir. Mimari gozle kontrol icin en onemli ciktidir.
+- Loss ve metriklerin epoch boyunca nasil degistigini grafik olarak gosterir.
 
-`best.pt` en iyi validation skoruna sahip model agirligidir. Inference ve sonraki sistemlerde kullanilacak ana dosyadir.
+`confusion_matrix.png`:
+
+- Hangi siniflarin birbirine karistigini gosterir.
+
+`val_batch*_pred.jpg`:
+
+- Validation goruntulerinde model tahminlerini gosterir.
+- Mimari gozle kontrol icin en onemli ciktidir.
+
+`best.pt`:
+
+- En iyi validation skoruna sahip model agirligidir.
+- Inference ve sonraki sistemlerde kullanilacak ana dosyadir.
 
 ## 9. Test Inference Kontrolu
 
@@ -305,7 +365,7 @@ Bu komut su ciktilari uretir:
 
 ```text
 outputs/reports/elements_test.json
-outputs/runs/infer-best/
+outputs/runs/infer-elements-test/
 ```
 
 `elements_test.json` icinde her tespit su mantikta saklanir:
@@ -383,7 +443,37 @@ Deney A: yolo11n-seg, imgsz 768, hizli kontrol
 Deney B: yolo11s-seg, imgsz 1024, ana baseline
 Deney C: yolo11m-seg, imgsz 1024, daha yuksek kapasite
 Deney D: yolo11s-seg, imgsz 1280, daha detayli maskeler
+Deney E: yolo11s-seg, controlled augmentation
 ```
+
+## 12.1 Kontrollu Augmentation Deneyi
+
+Ultralytics varsayilan egitiminde augmentation zaten aciktir. Ancak mimari cephe segmentasyonu icin `mosaic=1.0` ve `erasing=0.4` gibi agresif ayarlar maske sinirlarini bozabilir. Bu nedenle ikinci deneyde daha kontrollu augmentation denenir:
+
+```bash
+yolo segment train \
+  model=yolo11s-seg.pt \
+  data=/content/lejanter_doga_vlm_codex/configs/elements_colab.yaml \
+  project=/content/lejanter_doga_vlm_codex/outputs/runs \
+  name=elements-seg-v2-aug-controlled \
+  epochs=300 \
+  patience=150 \
+  imgsz=1024 \
+  batch=-1 \
+  device=0 \
+  mosaic=0.3 \
+  erasing=0.0 \
+  scale=0.3 \
+  translate=0.05 \
+  hsv_h=0.01 \
+  hsv_s=0.4 \
+  hsv_v=0.3 \
+  fliplr=0.5 \
+  flipud=0.0 \
+  perspective=0.0
+```
+
+Bu deney `elements-seg-v1` sonucunu ezmez; `elements-seg-v2-aug-controlled` adiyla ayri kaydedilir. Karsilastirma `Mask mAP50`, `Mask mAP50-95`, `Recall`, `results.png` ve validation/test overlay gorselleri uzerinden yapilacaktir.
 
 ## 13. Cephe Segmentasyonu ile Iliski
 
@@ -413,7 +503,7 @@ Sag cephede 8 tugla_duvar ve 2 dogal_tas_duvar_harcli alan tespit edildi.
 - Dataset kucuk oldugu icin model overfit olabilir.
 - Valid/test setleri sadece 5'er goruntu oldugu icin metrikler oynak olabilir.
 - Bazi siniflar gorsel olarak birbirine yakin oldugundan confusion matrix dikkatle incelenmelidir.
-- Dosya adlarinda Turkce karakterler Colab/Linux ortaminda sorun cikarmazsa devam edilebilir; sorun cikarsa Roboflow export adlari sadelestirilebilir.
+- Dosya adlarinda Turkce karakterler Colab/Linux ortaminda sorun cikarmazsa devam edilebilir; sorun cikarsa Roboflow export adlari sadeleştirilebilir.
 - Mimari rapor katmaninda sayilar model JSON'undan gelmeli, LLM'in sayi uydurmasina izin verilmemelidir.
 
 ## 15. Ozet
