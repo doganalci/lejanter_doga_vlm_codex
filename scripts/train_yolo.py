@@ -27,6 +27,7 @@ def main() -> None:
         help="Batch size. Use -1 for Ultralytics AutoBatch, or set an int such as 4/8/16.",
     )
     parser.add_argument("--device", default=None, help="Example: 0, 0,1, cpu, mps.")
+    parser.add_argument("--project", type=Path, default=Path("outputs/runs"), help="Output project directory.")
     parser.add_argument("--workers", type=int, default=8)
     args = parser.parse_args()
 
@@ -38,7 +39,7 @@ def main() -> None:
         batch=args.batch,
         device=args.device,
         workers=args.workers,
-        project="outputs/runs",
+        project=str(args.project.resolve()),
         name=args.name,
         exist_ok=True,
     )
