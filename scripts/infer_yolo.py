@@ -60,6 +60,7 @@ def main() -> None:
     parser.add_argument("--conf", type=float, default=0.25)
     parser.add_argument("--device", default=None)
     parser.add_argument("--name", default=None, help="Run name under outputs/runs.")
+    parser.add_argument("--project", type=Path, default=Path("outputs/runs"), help="Output project directory.")
     parser.add_argument("--save-visuals", action="store_true")
     args = parser.parse_args()
 
@@ -69,7 +70,7 @@ def main() -> None:
         imgsz=args.imgsz,
         conf=args.conf,
         device=args.device,
-        project="outputs/runs",
+        project=str(args.project.resolve()),
         name=args.name or f"infer-{args.weights.stem}",
         save=args.save_visuals,
         exist_ok=True,
