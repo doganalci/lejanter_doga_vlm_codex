@@ -34,6 +34,15 @@ Runtime -> Change runtime type -> GPU
 GPU preference: A100 > L4 > T4
 ```
 
+The Colab notebook can also pull data from the shared Google Drive folder:
+
+```text
+dataset/  -> Roboflow YOLO zip
+weights/  -> trained .pt model weights
+test/     -> external test images for visual comparison
+reports/  -> exported runs, metrics, configs, and benchmark visuals
+```
+
 ## Technical Report
 
 See [docs/technical_report.md](docs/technical_report.md) for the detailed method report, training plan, expected durations, metric definitions, and evaluation checklist.
