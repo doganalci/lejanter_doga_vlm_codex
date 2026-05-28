@@ -21,7 +21,7 @@ Google Drive shared folder
 Paylasilan klasor:
 
 ```text
-https://drive.google.com/drive/folders/1vmSSPsnu4fVBkM0yn1ScU7DFgDXyOksa
+https://drive.google.com/drive/folders/1QJD49ylJs9PpidPDQEcCMhx0RltWUfTT
 ```
 
 Zip icerigi:
