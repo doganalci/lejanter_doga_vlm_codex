@@ -81,7 +81,8 @@ def main() -> None:
     model = build_sam2(args.model_cfg, str(args.checkpoint), device=device)
     predictor = SAM2ImagePredictor(model)
 
-    records = json.loads(args.detections.read_text(encoding="utf-8"))
+    loaded = json.loads(args.detections.read_text(encoding="utf-8"))
+    records = loaded["records"] if isinstance(loaded, dict) and "records" in loaded else loaded
     refined_records: list[dict[str, Any]] = []
     args.visual_dir.mkdir(parents=True, exist_ok=True)
 
