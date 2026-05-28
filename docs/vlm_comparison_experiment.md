@@ -48,6 +48,30 @@ outputs/vlm_comparison/detection_assisted_report.md
 outputs/vlm_comparison/comparison_report.md
 ```
 
+## Improved Detection-Assisted Prompt
+
+Ilk VLM denemesinde model toplam tespit sayisini dogru korusa da sinif dagilimini yeniden sayarken hata yapabildi. Bu nedenle gelistirilmis hibrit rapor yaklasiminda VLM'ye ham uzun tespit listesi yerine once dogrulanmis ozet alanlar verilir:
+
+```json
+{
+  "total_detections": 74,
+  "class_counts": {
+    "ahsap_dograma": 19,
+    "cam": 55
+  },
+  "sample_detections": []
+}
+```
+
+Prompt ilkesi:
+
+```text
+Use total_detections and class_counts as the only authoritative counts.
+Do not recount sample_detections.
+```
+
+Bu yapi VLM'nin yorumlama ve raporlama gucunu kullanirken sayisal degerleri deterministik bilgisayarla gorme ciktisindan alir.
+
 ## Paper Note
 
 ```text
