@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import base64
 import datetime as dt
+import traceback
 import json
 import shutil
 import sqlite3
@@ -13,7 +14,6 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-import requests
 from PIL import Image
 
 
@@ -189,6 +189,8 @@ def call_vlm(
 ) -> str:
     if not api_key.strip():
         return "VLM raporu uretilmedi: API key girilmedi."
+    import requests
+
     response = requests.post(
         f"{base_url.rstrip('/')}/chat/completions",
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
@@ -225,7 +227,8 @@ class EvaluationRunner:
         reports_dir: Path,
         weights_dir: Path,
         db_path: Path,
-        device: str,
+        yolo_device: str,
+        sam2_device: str,
         sam2_dir: Path | None,
         sam2_checkpoint: Path | None,
         sam2_model_cfg: str,
@@ -234,7 +237,8 @@ class EvaluationRunner:
         self.reports_dir = reports_dir
         self.weights_dir = weights_dir
         self.db_path = db_path
-        self.device = device
+        self.yolo_device = yolo_device
+        self.sam2_device = sam2_device
         self.sam2_dir = sam2_dir
         self.sam2_checkpoint = sam2_checkpoint
         self.sam2_model_cfg = sam2_model_cfg
@@ -269,8 +273,8 @@ class EvaluationRunner:
             str(project),
             "--save-visuals",
         ]
-        if self.device:
-            command.extend(["--device", self.device])
+        if self.yolo_device:
+            command.extend(["--device", self.yolo_device])
         run_command(command, self.project_dir)
 
         visual = first_visual(project / run_name)
@@ -345,7 +349,7 @@ class EvaluationRunner:
                 "--visual-dir",
                 str(visual_dir),
                 "--device",
-                self.device or "cuda",
+                self.sam2_device or "cuda",
             ],
             self.sam2_dir,
         )
@@ -451,17 +455,21 @@ def build_app(runner: EvaluationRunner):
     def run_clicked(image_file, api_key, vlm_model, run_v1, run_v2, run_v3, run_hybrid, run_vlm):
         if image_file is None:
             raise gr.Error("Once bir gorsel yukle.")
-        session_id, gallery, report, db_path, targets = runner.run_session(
-            image_file=image_file,
-            api_key=api_key or "",
-            vlm_model=vlm_model or "gpt-4o",
-            run_v1=run_v1,
-            run_v2=run_v2,
-            run_v3=run_v3,
-            run_hybrid=run_hybrid,
-            run_vlm=run_vlm,
-        )
-        return session_id, gallery, report, db_path, gr.update(choices=targets, value="overall")
+        try:
+            session_id, gallery, report, db_path, targets = runner.run_session(
+                image_file=image_file,
+                api_key=api_key or "",
+                vlm_model=vlm_model or "gpt-4o",
+                run_v1=run_v1,
+                run_v2=run_v2,
+                run_v3=run_v3,
+                run_hybrid=run_hybrid,
+                run_vlm=run_vlm,
+            )
+            return session_id, gallery, report, db_path, gr.update(choices=targets, value="overall")
+        except Exception as exc:
+            error_text = f"## Hata\n\n```text\n{exc}\n\n{traceback.format_exc()}\n```"
+            return "", [], error_text, str(runner.db_path), gr.update(choices=["overall"], value="overall")
 
     def save_rating_clicked(session_id, target_name, score, comment):
         if not session_id:
@@ -475,7 +483,7 @@ def build_app(runner: EvaluationRunner):
         session_state = gr.State("")
         with gr.Row():
             with gr.Column(scale=1):
-                image = gr.File(label="Test image", file_types=["image"], type="filepath")
+                image = gr.Image(label="Test image", type="filepath")
                 api_key = gr.Textbox(label="OpenAI API key", type="password")
                 vlm_model = gr.Textbox(label="VLM model", value="gpt-4o")
                 run_v1 = gr.Checkbox(label="YOLO v1", value=True)
@@ -512,7 +520,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--reports-dir", type=Path, required=True)
     parser.add_argument("--weights-dir", type=Path, required=True)
     parser.add_argument("--db-path", type=Path, default=None)
-    parser.add_argument("--device", default="0")
+    parser.add_argument("--device", default="0", help="Backward-compatible alias for --yolo-device.")
+    parser.add_argument("--yolo-device", default=None)
+    parser.add_argument("--sam2-device", default="cuda")
     parser.add_argument("--sam2-dir", type=Path, default=None)
     parser.add_argument("--sam2-checkpoint", type=Path, default=None)
     parser.add_argument("--sam2-model-cfg", default="configs/sam2.1/sam2.1_hiera_t.yaml")
@@ -528,7 +538,8 @@ def main() -> None:
         reports_dir=args.reports_dir.resolve(),
         weights_dir=args.weights_dir.resolve(),
         db_path=db_path.resolve(),
-        device=args.device,
+        yolo_device=args.yolo_device or args.device,
+        sam2_device=args.sam2_device,
         sam2_dir=args.sam2_dir.resolve() if args.sam2_dir else None,
         sam2_checkpoint=args.sam2_checkpoint.resolve() if args.sam2_checkpoint else None,
         sam2_model_cfg=args.sam2_model_cfg,
