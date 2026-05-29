@@ -274,7 +274,6 @@ def write_final_report(session: Path, summary: dict[str, Any]) -> Path:
                 lines += [Path(path).read_text(encoding="utf-8"), ""]
     report = final / "REPORT.md"
     report.write_text("\n".join(lines), encoding="utf-8")
-    shutil.copy2(report, session / "analysis_report.md")
     return report
 
 
