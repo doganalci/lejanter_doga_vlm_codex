@@ -118,7 +118,12 @@ def run_yolo(project: Path, session: Path, weights_dir: Path, image: Path, alias
         return {"name": alias, "status": "missing weight", "json": None, "visual": None}
     out_json = model_dir / "detections.json"
     runs = model_dir / "runs"
-    cmd = [sys.executable, "scripts/infer_yolo.py", "--weights", str(weight), "--source", str(image), "--task", "segment", "--conf", "0.25", "--out", str(out_json), "--name", alias, "--project", str(runs), "--save-visuals"]
+    cmd = [
+        sys.executable, "scripts/infer_yolo.py",
+        "--weights", str(weight), "--source", str(image), "--task", "segment",
+        "--conf", "0.25", "--out", str(out_json), "--name", alias,
+        "--project", str(runs), "--save-visuals",
+    ]
     if device:
         cmd += ["--device", device]
     sh(cmd, project)
@@ -127,11 +132,20 @@ def run_yolo(project: Path, session: Path, weights_dir: Path, image: Path, alias
         copied = model_dir / visual.name
         shutil.copy2(visual, copied)
         visual = copied
-    return {"name": alias, "status": "ok", "weight": str(weight), "json": str(out_json), "visual": str(visual) if visual else None, "counts": counts(out_json)}
+    return {
+        "name": alias, "status": "ok", "weight": str(weight),
+        "json": str(out_json), "visual": str(visual) if visual else None,
+        "counts": counts(out_json),
+    }
 
 
 def refine_sam(project: Path, sam2_dir: Path, detections: Path, checkpoint: Path, cfg: str, out_json: Path, visual_dir: Path, device: str) -> Path | None:
-    sh([sys.executable, str(project / "scripts/refine_with_sam2.py"), "--detections", str(detections), "--checkpoint", str(checkpoint), "--model-cfg", cfg, "--out", str(out_json), "--visual-dir", str(visual_dir), "--device", device], sam2_dir)
+    sh([
+        sys.executable, str(project / "scripts/refine_with_sam2.py"),
+        "--detections", str(detections), "--checkpoint", str(checkpoint),
+        "--model-cfg", cfg, "--out", str(out_json), "--visual-dir", str(visual_dir),
+        "--device", device,
+    ], sam2_dir)
     return first_visual(visual_dir)
 
 
@@ -155,7 +169,12 @@ def run_hybrid(project: Path, session: Path, weights_dir: Path, image: Path, arg
         return {"name": "hybrid_yolo_sam2", "status": "missing yolo_v3", "json": None, "visual": None}
     out_dir = session / "hybrid_yolo_sam2"
     filtered = out_dir / "yolo_filtered_conf078.json"
-    sh([sys.executable, "scripts/filter_detections.py", "--input", str(raw_json), "--out", str(filtered), "--default-conf", "0.78", "--class-threshold", "cam=0.82", "--class-threshold", "ahsap_dograma=0.78", "--class-threshold", "camur_harc=0.72", "--min-area-ratio", "0.00005", "--max-area-ratio", "0.35", "--nms-iou", "0.25"], project)
+    sh([
+        sys.executable, "scripts/filter_detections.py", "--input", str(raw_json), "--out", str(filtered),
+        "--default-conf", "0.78", "--class-threshold", "cam=0.82",
+        "--class-threshold", "ahsap_dograma=0.78", "--class-threshold", "camur_harc=0.72",
+        "--min-area-ratio", "0.00005", "--max-area-ratio", "0.35", "--nms-iou", "0.25",
+    ], project)
     if not args.sam2_dir or not args.sam2_dir.exists() or not args.sam2_checkpoint or not args.sam2_checkpoint.exists():
         return {"name": "hybrid_yolo_sam2", "status": "filtered only; SAM2 not installed", "json": str(filtered), "visual": raw.get("visual"), "counts": counts(filtered)}
     out_json = out_dir / "hybrid_yolo_sam2.json"
@@ -174,7 +193,13 @@ def call_vlm(image: Path, prompt: str, api_key: str, model: str) -> str:
     res = requests.post(
         "https://api.openai.com/v1/chat/completions",
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        json={"model": model, "temperature": 0.2, "messages": [{"role": "system", "content": "Turkce yanit veren mimari cephe lejant raporu asistanisin. Sayilari uydurma, verilen ozet sayilari esas al."}, {"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": data_url(image)}}]}]},
+        json={
+            "model": model, "temperature": 0.2,
+            "messages": [
+                {"role": "system", "content": "Turkce yanit veren mimari cephe lejant raporu asistanisin. Sayilari uydurma, verilen ozet sayilari esas al."},
+                {"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": data_url(image)}}]},
+            ],
+        },
         timeout=180,
     )
     if res.status_code == 401:
