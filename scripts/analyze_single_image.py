@@ -13,13 +13,26 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 
 WEIGHT_ALIASES = {
     "yolo_v1_default": ["elements-seg-v1-best.pt", "*v1*best*.pt"],
     "yolo_v2_aug_controlled": ["elements-seg-v2-aug-controlled-best.pt", "*v2*best*.pt"],
     "yolo_v3_no_erasing": ["elements-seg-v3-no-erasing-best.pt", "*v3*best*.pt", "*.pt"],
+}
+
+DISPLAY_NAMES = {
+    "input_image": "Original Input Image",
+    "yolo_v1_default": "YOLO v1 Default",
+    "yolo_v2_aug_controlled": "YOLO v2 Aug Controlled",
+    "yolo_v3_no_erasing": "YOLO v3 No Erasing",
+    "sam2_from_yolo_v3": "SAM2 From YOLO v3",
+    "hybrid_yolo_sam2": "Hybrid Filtered YOLO v3 + SAM2",
+    "image_only": "VLM: Sadece Resim",
+    "yolo_assisted": "VLM: Resim + YOLO Ciktilari",
+    "sam2_assisted": "VLM: Resim + SAM2 Ciktisi",
+    "hybrid_yolo_sam2_assisted": "VLM: Resim + Hibrit Cikti",
 }
 
 
@@ -51,6 +64,28 @@ def normalize_input_image(source_path: Path, out_dir: Path) -> Path:
     target = out_dir / "input.jpg"
     Image.open(source_path).convert("RGB").save(target, quality=94)
     return target
+
+
+def slug(value: str) -> str:
+    return "".join(ch if ch.isalnum() else "_" for ch in value.lower()).strip("_")
+
+
+def label_image(source_path: Path, target_path: Path, label: str) -> Path:
+    image = Image.open(source_path).convert("RGB")
+    width, height = image.size
+    banner_height = max(54, int(height * 0.075))
+    output = Image.new("RGB", (width, height + banner_height), (18, 18, 18))
+    output.paste(image, (0, banner_height))
+    draw = ImageDraw.Draw(output)
+    try:
+        font = ImageFont.truetype("DejaVuSans-Bold.ttf", max(22, int(banner_height * 0.42)))
+    except OSError:
+        font = ImageFont.load_default()
+    draw.rectangle([0, 0, width, banner_height], fill=(18, 18, 18))
+    draw.text((18, max(10, banner_height // 4)), label, fill=(255, 255, 255), font=font)
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    output.save(target_path, quality=94)
+    return target_path
 
 
 def first_visual(run_dir: Path) -> Path | None:
@@ -279,6 +314,7 @@ def run_sam2_from_yolo(
     raw_json = Path(raw["json"]) if raw.get("json") else None
     if raw_json is None:
         return {"name": "sam2_from_yolo_v3", "status": "missing yolo_v3", "json": None, "visual": None}
+
     if not sam2_dir or not sam2_dir.exists() or not sam2_checkpoint or not sam2_checkpoint.exists():
         return {
             "name": "sam2_from_yolo_v3",
@@ -319,203 +355,4 @@ def run_sam2_from_yolo(
         "raw_json": str(raw_json),
         "json": str(sam_json),
         "visual": str(visual) if visual else None,
-        "counts": detection_counts(sam_json),
-    }
-
-
-def write_reports(
-    session_dir: Path,
-    image_path: Path,
-    results: list[dict[str, Any]],
-    run_vlm: bool,
-    api_key: str,
-    vlm_model: str,
-) -> dict[str, str]:
-    report_dir = session_dir / "vlm_reports"
-    report_dir.mkdir(parents=True, exist_ok=True)
-    by_name = {item["name"]: item for item in results}
-    payload = {
-        "instruction": "Use total_detections and class_counts as authoritative counts. Do not recount samples.",
-        "results": {item["name"]: item.get("counts", {}) for item in results},
-    }
-    (session_dir / "machine_summary.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    reports: dict[str, str] = {}
-    if not run_vlm:
-        return reports
-
-    yolo_payload = {
-        "instruction": "Use these YOLO counts as authoritative.",
-        "results": {
-            key: by_name[key].get("counts", {})
-            for key in ("yolo_v1_default", "yolo_v2_aug_controlled", "yolo_v3_no_erasing")
-            if key in by_name
-        },
-    }
-    sam_payload = {
-        "instruction": "This is SAM2 mask refinement prompted by YOLO v3 boxes. Use counts as authoritative.",
-        "results": {"sam2_from_yolo_v3": by_name.get("sam2_from_yolo_v3", {}).get("counts", {})},
-    }
-    hybrid_payload = {
-        "instruction": "This is filtered YOLO v3 plus SAM2 refinement. Use counts as authoritative.",
-        "results": {"hybrid_yolo_sam2": by_name.get("hybrid_yolo_sam2", {}).get("counts", {})},
-    }
-
-    prompts = {
-        "image_only": "Bu cephe gorselini mimari cephe lejant raporu olarak yorumla. Sayilari tahminse belirt.",
-        "yolo_assisted": (
-            "Bu gorsel ve asagidaki YOLO v1/v2/v3 ciktilarina gore mimari cephe lejant raporu yaz. "
-            "Uc YOLO versiyonunu adetler ve sinif dagilimi acisindan ayri ayri belirt. "
-            "Sayi olarak sadece total_detections ve class_counts alanlarini kullan.\n\n"
-            + json.dumps(yolo_payload, ensure_ascii=False, indent=2)
-        ),
-        "sam2_assisted": (
-            "Bu gorsel ve SAM2 ile iyilestirilmis maske sonucuna gore mimari cephe lejant raporu yaz. "
-            "SAM2 sonucunun YOLO v3 kutulari ile yonlendirildigini belirt. "
-            "Sayi olarak sadece total_detections ve class_counts alanlarini kullan.\n\n"
-            + json.dumps(sam_payload, ensure_ascii=False, indent=2)
-        ),
-        "hybrid_yolo_sam2_assisted": (
-            "Bu gorsel ve filtreli YOLO + SAM2 hibrit sonucuna gore teknik mimari cephe lejant raporu yaz. "
-            "Bu ciktiyi nihai/temizlenmis model sonucu gibi yorumla. "
-            "Sayi olarak sadece total_detections ve class_counts alanlarini kullan.\n\n"
-            + json.dumps(hybrid_payload, ensure_ascii=False, indent=2)
-        ),
-    }
-    for name, prompt in prompts.items():
-        text = call_vlm(image_path, prompt, api_key=api_key, model=vlm_model)
-        path = report_dir / f"{name}.md"
-        path.write_text(text, encoding="utf-8")
-        reports[name] = str(path)
-    return reports
-
-
-def write_markdown_report(session_dir: Path, summary: dict[str, Any]) -> Path:
-    lines = [
-        "# Single Image Analysis Report",
-        "",
-        f"Session dir: `{summary['session_dir']}`",
-        "",
-        "## Input Image",
-        "",
-        f"![input]({summary['input_image']})",
-        "",
-        "## Model Outputs",
-        "",
-    ]
-    for item in summary.get("results", []):
-        lines.extend(
-            [
-                f"### {item['name']}",
-                "",
-                f"Status: `{item.get('status')}`",
-                "",
-                "Counts:",
-                "",
-                "```json",
-                json.dumps(item.get("counts", {}), ensure_ascii=False, indent=2),
-                "```",
-                "",
-            ]
-        )
-        if item.get("visual"):
-            lines.extend([f"![{item['name']}]({item['visual']})", ""])
-    if summary.get("vlm_reports"):
-        lines.extend(["## VLM Reports", ""])
-        for name, report_path in summary["vlm_reports"].items():
-            lines.extend([f"### {name}", ""])
-            path = Path(report_path)
-            if path.exists():
-                lines.extend([path.read_text(encoding="utf-8"), ""])
-    report_path = session_dir / "analysis_report.md"
-    report_path.write_text("\n".join(lines), encoding="utf-8")
-    return report_path
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Analyze one uploaded image with YOLO/SAM2/VLM.")
-    parser.add_argument("--image", required=True, type=Path)
-    parser.add_argument("--project-dir", type=Path, default=Path.cwd())
-    parser.add_argument("--weights-dir", required=True, type=Path)
-    parser.add_argument("--reports-dir", required=True, type=Path)
-    parser.add_argument("--session-name", default=None)
-    parser.add_argument("--yolo-device", default="0")
-    parser.add_argument("--run-v1", action="store_true")
-    parser.add_argument("--run-v2", action="store_true")
-    parser.add_argument("--run-v3", action="store_true")
-    parser.add_argument("--run-sam2", action="store_true")
-    parser.add_argument("--run-hybrid", action="store_true")
-    parser.add_argument("--sam2-dir", type=Path, default=None)
-    parser.add_argument("--sam2-checkpoint", type=Path, default=None)
-    parser.add_argument("--sam2-model-cfg", default="configs/sam2.1/sam2.1_hiera_t.yaml")
-    parser.add_argument("--sam2-device", default="cuda")
-    parser.add_argument("--run-vlm", action="store_true")
-    parser.add_argument("--vlm-model", default="gpt-4o")
-    args = parser.parse_args()
-
-    session_name = args.session_name or f"single_image_{now_stamp()}_{uuid.uuid4().hex[:8]}"
-    session_dir = args.reports_dir / "single_image_analysis" / session_name
-    input_image = normalize_input_image(args.image, session_dir / "input")
-
-    results: list[dict[str, Any]] = []
-    if args.run_v1:
-        results.append(run_yolo(args.project_dir, session_dir, args.weights_dir, input_image, "yolo_v1_default", 0.25, args.yolo_device))
-    if args.run_v2:
-        results.append(run_yolo(args.project_dir, session_dir, args.weights_dir, input_image, "yolo_v2_aug_controlled", 0.25, args.yolo_device))
-    if args.run_v3:
-        results.append(run_yolo(args.project_dir, session_dir, args.weights_dir, input_image, "yolo_v3_no_erasing", 0.25, args.yolo_device))
-    if args.run_sam2:
-        results.append(
-            run_sam2_from_yolo(
-                args.project_dir,
-                session_dir,
-                args.weights_dir,
-                input_image,
-                args.yolo_device,
-                args.sam2_dir,
-                args.sam2_checkpoint,
-                args.sam2_model_cfg,
-                args.sam2_device,
-            )
-        )
-    if args.run_hybrid:
-        results.append(
-            run_hybrid(
-                args.project_dir,
-                session_dir,
-                args.weights_dir,
-                input_image,
-                args.yolo_device,
-                args.sam2_dir,
-                args.sam2_checkpoint,
-                args.sam2_model_cfg,
-                args.sam2_device,
-            )
-        )
-
-    reports = write_reports(
-        session_dir=session_dir,
-        image_path=input_image,
-        results=results,
-        run_vlm=args.run_vlm,
-        api_key=os.environ.get("OPENAI_API_KEY", ""),
-        vlm_model=args.vlm_model,
-    )
-
-    summary = {
-        "session_dir": str(session_dir),
-        "input_image": str(input_image),
-        "results": results,
-        "vlm_reports": reports,
-    }
-    summary_path = session_dir / "summary.json"
-    summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-    report_path = write_markdown_report(session_dir, summary)
-    summary["analysis_report"] = str(report_path)
-    summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-    print("\n=== ANALYSIS SUMMARY ===")
-    print(json.dumps(summary, ensure_ascii=False, indent=2))
-
-
-if __name__ == "__main__":
-    main()
+        
