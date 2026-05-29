@@ -412,24 +412,36 @@ class EvaluationRunner:
         vlm_yolo: bool,
         vlm_sam: bool,
         vlm_hybrid: bool,
-    ) -> tuple[str, list[tuple[str, str]], str, str, list[str]]:
+    ) -> tuple[str, list[tuple[str, str]], str, str, list[str], str]:
         session_id = f"session_{now_stamp()}_{uuid.uuid4().hex[:8]}"
         session_dir = self.reports_dir / "evaluation_sessions" / session_id
+        debug_log = [f"Session: {session_id}", f"Session dir: {session_dir}"]
         input_dir = session_dir / "input"
         image_path = normalize_input_image(image_file, input_dir)
+        debug_log.append(f"Input image: {image_path}")
         insert_session(self.db_path, session_id, image_path, session_dir)
         insert_artifact(self.db_path, session_id, "image", "input", image_path)
 
         results: list[dict[str, Any]] = []
         if run_v1:
-            results.append(self.run_yolo(session_id, session_dir, image_path, "yolo_v1_default", conf=0.25))
+            result = self.run_yolo(session_id, session_dir, image_path, "yolo_v1_default", conf=0.25)
+            results.append(result)
+            debug_log.append(f"YOLO v1: {result['status']} json={result.get('json')} visual={result.get('visual')}")
         if run_v2:
-            results.append(self.run_yolo(session_id, session_dir, image_path, "yolo_v2_aug_controlled", conf=0.25))
+            result = self.run_yolo(session_id, session_dir, image_path, "yolo_v2_aug_controlled", conf=0.25)
+            results.append(result)
+            debug_log.append(f"YOLO v2: {result['status']} json={result.get('json')} visual={result.get('visual')}")
         if run_v3:
-            results.append(self.run_yolo(session_id, session_dir, image_path, "yolo_v3_no_erasing", conf=0.25))
+            result = self.run_yolo(session_id, session_dir, image_path, "yolo_v3_no_erasing", conf=0.25)
+            results.append(result)
+            debug_log.append(f"YOLO v3: {result['status']} json={result.get('json')} visual={result.get('visual')}")
         hybrid_result = None
         if run_hybrid or vlm_sam or vlm_hybrid:
             hybrid_result = self.run_hybrid(session_id, session_dir, image_path)
+            debug_log.append(
+                f"Hybrid YOLO+SAM2: {hybrid_result['status']} "
+                f"json={hybrid_result.get('json')} visual={hybrid_result.get('visual')}"
+            )
             if run_hybrid:
                 results.append(hybrid_result)
 
@@ -467,6 +479,7 @@ class EvaluationRunner:
                 save_vlm_report(self.db_path, session_id, vlm_dir, "vlm_image_only", image_only)
                 reports_md.extend(["## VLM - Sadece Gorsel", image_only, ""])
                 target_names.append("vlm_image_only")
+                debug_log.append("VLM image-only report generated.")
 
             if vlm_yolo:
                 yolo_report = call_vlm(
@@ -483,6 +496,7 @@ class EvaluationRunner:
                 save_vlm_report(self.db_path, session_id, vlm_dir, "vlm_yolo_assisted", yolo_report, yolo_payload)
                 reports_md.extend(["## VLM - YOLO Ozetli", yolo_report, ""])
                 target_names.append("vlm_yolo_assisted")
+                debug_log.append("VLM YOLO-assisted report generated.")
 
             if vlm_sam:
                 sam_payload = {
@@ -503,6 +517,7 @@ class EvaluationRunner:
                 save_vlm_report(self.db_path, session_id, vlm_dir, "vlm_sam2_assisted", sam_report, sam_payload)
                 reports_md.extend(["## VLM - SAM2 Ozetli", sam_report, ""])
                 target_names.append("vlm_sam2_assisted")
+                debug_log.append("VLM SAM2-assisted report generated.")
 
             if vlm_hybrid:
                 hybrid_report = call_vlm(
@@ -519,12 +534,15 @@ class EvaluationRunner:
                 save_vlm_report(self.db_path, session_id, vlm_dir, "vlm_hybrid_yolo_sam2", hybrid_report, assisted_payload)
                 reports_md.extend(["## VLM - YOLO + SAM2 Hibrit", hybrid_report, ""])
                 target_names.append("vlm_hybrid_yolo_sam2")
+                debug_log.append("VLM hybrid report generated.")
 
         summary_path = session_dir / "session_summary.md"
         summary_path.write_text("\n".join(reports_md), encoding="utf-8")
         insert_artifact(self.db_path, session_id, "report", "session_summary", summary_path)
+        debug_log.append(f"Summary: {summary_path}")
+        debug_log.append(f"SQLite DB: {self.db_path}")
 
-        return session_id, gallery, "\n".join(reports_md), str(self.db_path), target_names
+        return session_id, gallery, "\n".join(reports_md), str(self.db_path), target_names, "\n".join(debug_log)
 
 
 def build_app(runner: EvaluationRunner):
@@ -546,7 +564,7 @@ def build_app(runner: EvaluationRunner):
         if image_file is None:
             raise gr.Error("Once bir gorsel yukle.")
         try:
-            session_id, gallery, report, db_path, targets = runner.run_session(
+            session_id, gallery, report, db_path, targets, debug_log = runner.run_session(
                 image_file=image_file,
                 api_key=api_key or "",
                 vlm_model=vlm_model or "gpt-4o",
@@ -559,10 +577,10 @@ def build_app(runner: EvaluationRunner):
                 vlm_sam=vlm_sam,
                 vlm_hybrid=vlm_hybrid,
             )
-            return session_id, gallery, report, db_path, gr.update(choices=targets, value="overall")
+            return session_id, gallery, report, db_path, debug_log, gr.update(choices=targets, value="overall")
         except Exception as exc:
             error_text = f"## Hata\n\n```text\n{exc}\n\n{traceback.format_exc()}\n```"
-            return "", [], error_text, str(runner.db_path), gr.update(choices=["overall"], value="overall")
+            return "", [], error_text, str(runner.db_path), traceback.format_exc(), gr.update(choices=["overall"], value="overall")
 
     def save_rating_clicked(session_id, target_name, score, comment):
         if not session_id:
@@ -594,6 +612,7 @@ def build_app(runner: EvaluationRunner):
                 gallery = gr.Gallery(label="Result visuals", columns=2, height=520)
                 report = gr.Markdown(label="Reports")
                 db_path = gr.Textbox(label="SQLite DB path")
+                debug_log = gr.Textbox(label="Debug log", lines=12)
 
         gr.Markdown("## Rating")
         with gr.Row():
@@ -618,7 +637,7 @@ def build_app(runner: EvaluationRunner):
                 vlm_sam,
                 vlm_hybrid,
             ],
-            outputs=[session_state, gallery, report, db_path, target],
+            outputs=[session_state, gallery, report, db_path, debug_log, target],
         )
         save_button.click(save_rating_clicked, inputs=[session_state, target, score, comment], outputs=[save_status])
     return app
@@ -655,7 +674,11 @@ def main() -> None:
         sam2_model_cfg=args.sam2_model_cfg,
     )
     app = build_app(runner)
-    app.launch(share=args.share, debug=True)
+    app.launch(
+        share=args.share,
+        debug=True,
+        allowed_paths=[str(args.project_dir.resolve()), str(args.reports_dir.resolve()), "/tmp"],
+    )
 
 
 if __name__ == "__main__":
