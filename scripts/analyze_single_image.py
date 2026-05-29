@@ -187,13 +187,13 @@ def run_hybrid(
     sam2_model_cfg: str,
     sam2_device: str,
 ) -> dict[str, Any]:
-    hybrid_dir = session_dir / "hybrid_yolo_sam2"
-    hybrid_dir.mkdir(parents=True, exist_ok=True)
     raw = run_yolo(project_dir, session_dir, weights_dir, image_path, "yolo_v3_no_erasing", 0.25, yolo_device)
     raw_json = Path(raw["json"]) if raw.get("json") else None
     if raw_json is None:
         return {"name": "hybrid_yolo_sam2", "status": "missing yolo_v3", "json": None, "visual": None}
 
+    hybrid_dir = session_dir / "hybrid_yolo_sam2"
+    hybrid_dir.mkdir(parents=True, exist_ok=True)
     filtered_json = hybrid_dir / "yolo_filtered_conf078.json"
     run_command(
         [
@@ -264,6 +264,65 @@ def run_hybrid(
     }
 
 
+def run_sam2_from_yolo(
+    project_dir: Path,
+    session_dir: Path,
+    weights_dir: Path,
+    image_path: Path,
+    yolo_device: str,
+    sam2_dir: Path | None,
+    sam2_checkpoint: Path | None,
+    sam2_model_cfg: str,
+    sam2_device: str,
+) -> dict[str, Any]:
+    raw = run_yolo(project_dir, session_dir, weights_dir, image_path, "yolo_v3_no_erasing", 0.25, yolo_device)
+    raw_json = Path(raw["json"]) if raw.get("json") else None
+    if raw_json is None:
+        return {"name": "sam2_from_yolo_v3", "status": "missing yolo_v3", "json": None, "visual": None}
+    if not sam2_dir or not sam2_dir.exists() or not sam2_checkpoint or not sam2_checkpoint.exists():
+        return {
+            "name": "sam2_from_yolo_v3",
+            "status": "SAM2 not installed; raw YOLO returned",
+            "raw_json": str(raw_json),
+            "json": str(raw_json),
+            "visual": raw.get("visual"),
+            "counts": detection_counts(raw_json),
+        }
+
+    sam_dir = session_dir / "sam2_from_yolo_v3"
+    sam_dir.mkdir(parents=True, exist_ok=True)
+    sam_json = sam_dir / "sam2_from_yolo_v3.json"
+    visual_dir = sam_dir / "visuals"
+    run_command(
+        [
+            sys.executable,
+            str(project_dir / "scripts/refine_with_sam2.py"),
+            "--detections",
+            str(raw_json),
+            "--checkpoint",
+            str(sam2_checkpoint),
+            "--model-cfg",
+            sam2_model_cfg,
+            "--out",
+            str(sam_json),
+            "--visual-dir",
+            str(visual_dir),
+            "--device",
+            sam2_device,
+        ],
+        sam2_dir,
+    )
+    visual = first_visual(visual_dir)
+    return {
+        "name": "sam2_from_yolo_v3",
+        "status": "ok",
+        "raw_json": str(raw_json),
+        "json": str(sam_json),
+        "visual": str(visual) if visual else None,
+        "counts": detection_counts(sam_json),
+    }
+
+
 def write_reports(
     session_dir: Path,
     image_path: Path,
@@ -274,6 +333,7 @@ def write_reports(
 ) -> dict[str, str]:
     report_dir = session_dir / "vlm_reports"
     report_dir.mkdir(parents=True, exist_ok=True)
+    by_name = {item["name"]: item for item in results}
     payload = {
         "instruction": "Use total_detections and class_counts as authoritative counts. Do not recount samples.",
         "results": {item["name"]: item.get("counts", {}) for item in results},
@@ -284,13 +344,42 @@ def write_reports(
     if not run_vlm:
         return reports
 
+    yolo_payload = {
+        "instruction": "Use these YOLO counts as authoritative.",
+        "results": {
+            key: by_name[key].get("counts", {})
+            for key in ("yolo_v1_default", "yolo_v2_aug_controlled", "yolo_v3_no_erasing")
+            if key in by_name
+        },
+    }
+    sam_payload = {
+        "instruction": "This is SAM2 mask refinement prompted by YOLO v3 boxes. Use counts as authoritative.",
+        "results": {"sam2_from_yolo_v3": by_name.get("sam2_from_yolo_v3", {}).get("counts", {})},
+    }
+    hybrid_payload = {
+        "instruction": "This is filtered YOLO v3 plus SAM2 refinement. Use counts as authoritative.",
+        "results": {"hybrid_yolo_sam2": by_name.get("hybrid_yolo_sam2", {}).get("counts", {})},
+    }
+
     prompts = {
         "image_only": "Bu cephe gorselini mimari cephe lejant raporu olarak yorumla. Sayilari tahminse belirt.",
-        "model_assisted": (
-            "Bu gorsel ve asagidaki model ciktilarina gore teknik mimari cephe lejant raporu yaz. "
-            "YOLO versiyonlarini, SAM2/hibrit sonucu ve farklari kisa karsilastir. "
+        "yolo_assisted": (
+            "Bu gorsel ve asagidaki YOLO v1/v2/v3 ciktilarina gore mimari cephe lejant raporu yaz. "
+            "Uc YOLO versiyonunu adetler ve sinif dagilimi acisindan ayri ayri belirt. "
             "Sayi olarak sadece total_detections ve class_counts alanlarini kullan.\n\n"
-            + json.dumps(payload, ensure_ascii=False, indent=2)
+            + json.dumps(yolo_payload, ensure_ascii=False, indent=2)
+        ),
+        "sam2_assisted": (
+            "Bu gorsel ve SAM2 ile iyilestirilmis maske sonucuna gore mimari cephe lejant raporu yaz. "
+            "SAM2 sonucunun YOLO v3 kutulari ile yonlendirildigini belirt. "
+            "Sayi olarak sadece total_detections ve class_counts alanlarini kullan.\n\n"
+            + json.dumps(sam_payload, ensure_ascii=False, indent=2)
+        ),
+        "hybrid_yolo_sam2_assisted": (
+            "Bu gorsel ve filtreli YOLO + SAM2 hibrit sonucuna gore teknik mimari cephe lejant raporu yaz. "
+            "Bu ciktiyi nihai/temizlenmis model sonucu gibi yorumla. "
+            "Sayi olarak sadece total_detections ve class_counts alanlarini kullan.\n\n"
+            + json.dumps(hybrid_payload, ensure_ascii=False, indent=2)
         ),
     }
     for name, prompt in prompts.items():
@@ -299,6 +388,48 @@ def write_reports(
         path.write_text(text, encoding="utf-8")
         reports[name] = str(path)
     return reports
+
+
+def write_markdown_report(session_dir: Path, summary: dict[str, Any]) -> Path:
+    lines = [
+        "# Single Image Analysis Report",
+        "",
+        f"Session dir: `{summary['session_dir']}`",
+        "",
+        "## Input Image",
+        "",
+        f"![input]({summary['input_image']})",
+        "",
+        "## Model Outputs",
+        "",
+    ]
+    for item in summary.get("results", []):
+        lines.extend(
+            [
+                f"### {item['name']}",
+                "",
+                f"Status: `{item.get('status')}`",
+                "",
+                "Counts:",
+                "",
+                "```json",
+                json.dumps(item.get("counts", {}), ensure_ascii=False, indent=2),
+                "```",
+                "",
+            ]
+        )
+        if item.get("visual"):
+            lines.extend([f"![{item['name']}]({item['visual']})", ""])
+    if summary.get("vlm_reports"):
+        lines.extend(["## VLM Reports", ""])
+        for name, report_path in summary["vlm_reports"].items():
+            lines.extend([f"### {name}", ""])
+            path = Path(report_path)
+            if path.exists():
+                lines.extend([path.read_text(encoding="utf-8"), ""])
+    report_path = session_dir / "analysis_report.md"
+    report_path.write_text("\n".join(lines), encoding="utf-8")
+    return report_path
 
 
 def main() -> None:
@@ -312,6 +443,7 @@ def main() -> None:
     parser.add_argument("--run-v1", action="store_true")
     parser.add_argument("--run-v2", action="store_true")
     parser.add_argument("--run-v3", action="store_true")
+    parser.add_argument("--run-sam2", action="store_true")
     parser.add_argument("--run-hybrid", action="store_true")
     parser.add_argument("--sam2-dir", type=Path, default=None)
     parser.add_argument("--sam2-checkpoint", type=Path, default=None)
@@ -332,6 +464,20 @@ def main() -> None:
         results.append(run_yolo(args.project_dir, session_dir, args.weights_dir, input_image, "yolo_v2_aug_controlled", 0.25, args.yolo_device))
     if args.run_v3:
         results.append(run_yolo(args.project_dir, session_dir, args.weights_dir, input_image, "yolo_v3_no_erasing", 0.25, args.yolo_device))
+    if args.run_sam2:
+        results.append(
+            run_sam2_from_yolo(
+                args.project_dir,
+                session_dir,
+                args.weights_dir,
+                input_image,
+                args.yolo_device,
+                args.sam2_dir,
+                args.sam2_checkpoint,
+                args.sam2_model_cfg,
+                args.sam2_device,
+            )
+        )
     if args.run_hybrid:
         results.append(
             run_hybrid(
@@ -363,6 +509,9 @@ def main() -> None:
         "vlm_reports": reports,
     }
     summary_path = session_dir / "summary.json"
+    summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    report_path = write_markdown_report(session_dir, summary)
+    summary["analysis_report"] = str(report_path)
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     print("\n=== ANALYSIS SUMMARY ===")
     print(json.dumps(summary, ensure_ascii=False, indent=2))
