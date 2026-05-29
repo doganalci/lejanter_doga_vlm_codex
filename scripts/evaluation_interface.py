@@ -23,6 +23,8 @@ WEIGHT_ALIASES = {
     "yolo_v3_no_erasing": ["elements-seg-v3-no-erasing-best.pt", "*v3*best*.pt", "*.pt"],
 }
 
+VLM_MODELS = ["gpt-4o", "gpt-4o-mini", "gpt-4.1", "gpt-4.1-mini"]
+
 
 def now_stamp() -> str:
     return dt.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -174,6 +176,36 @@ def make_report_payload(raw_json: Path | None, filtered_json: Path | None, hybri
     }
 
 
+def make_yolo_payload(results: list[dict[str, Any]]) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "instruction": "Use total_detections and class_counts as authoritative counts. Do not recount samples.",
+        "models": {},
+    }
+    for result in results:
+        if not result["name"].startswith("yolo_") or not result.get("json"):
+            continue
+        payload["models"][result["name"]] = detection_counts(one_record(result["json"]))
+    return payload
+
+
+def save_vlm_report(
+    db_path: Path,
+    session_id: str,
+    vlm_dir: Path,
+    report_name: str,
+    content: str,
+    payload: dict[str, Any] | None = None,
+) -> Path:
+    report_path = vlm_dir / f"{report_name}.md"
+    report_path.write_text(content, encoding="utf-8")
+    insert_artifact(db_path, session_id, "report", report_name, report_path, payload)
+    if payload is not None:
+        payload_path = vlm_dir / f"{report_name}_payload.json"
+        payload_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        insert_artifact(db_path, session_id, "json", f"{report_name}_payload", payload_path)
+    return report_path
+
+
 def image_data_url(path: Path) -> str:
     encoded = base64.b64encode(path.read_bytes()).decode("utf-8")
     return f"data:image/jpeg;base64,{encoded}"
@@ -216,7 +248,15 @@ def call_vlm(
         },
         timeout=180,
     )
-    response.raise_for_status()
+    if response.status_code == 401:
+        return (
+            "VLM raporu uretilmedi: OpenAI API key yetkisiz veya hatali gorunuyor. "
+            "Anahtar `sk-...` ile baslamali ve bu proje/model icin yetkili olmali."
+        )
+    if response.status_code == 404:
+        return f"VLM raporu uretilmedi: `{model}` modeli bu API key ile bulunamadi veya erisilebilir degil."
+    if response.status_code >= 400:
+        return f"VLM raporu uretilmedi: HTTP {response.status_code}\n\n{response.text[:1200]}"
     return response.json()["choices"][0]["message"]["content"]
 
 
@@ -368,7 +408,10 @@ class EvaluationRunner:
         run_v2: bool,
         run_v3: bool,
         run_hybrid: bool,
-        run_vlm: bool,
+        vlm_image_only: bool,
+        vlm_yolo: bool,
+        vlm_sam: bool,
+        vlm_hybrid: bool,
     ) -> tuple[str, list[tuple[str, str]], str, str, list[str]]:
         session_id = f"session_{now_stamp()}_{uuid.uuid4().hex[:8]}"
         session_dir = self.reports_dir / "evaluation_sessions" / session_id
@@ -385,9 +428,10 @@ class EvaluationRunner:
         if run_v3:
             results.append(self.run_yolo(session_id, session_dir, image_path, "yolo_v3_no_erasing", conf=0.25))
         hybrid_result = None
-        if run_hybrid:
+        if run_hybrid or vlm_sam or vlm_hybrid:
             hybrid_result = self.run_hybrid(session_id, session_dir, image_path)
-            results.append(hybrid_result)
+            if run_hybrid:
+                results.append(hybrid_result)
 
         reports_md = ["# Evaluation Results", "", f"Session: `{session_id}`", ""]
         gallery: list[tuple[str, str]] = [(str(image_path), "input")]
@@ -403,44 +447,78 @@ class EvaluationRunner:
                 gallery.append((str(result["visual"]), result["name"]))
             target_names.append(result["name"])
 
-        if run_vlm:
+        if any([vlm_image_only, vlm_yolo, vlm_sam, vlm_hybrid]):
             assisted_payload = make_report_payload(
                 raw_json=hybrid_result.get("raw_json") if hybrid_result else None,
                 filtered_json=(session_dir / "hybrid_yolo_sam2" / "yolo_filtered_conf078.json"),
                 hybrid_json=hybrid_result.get("json") if hybrid_result else None,
             )
+            yolo_payload = make_yolo_payload(results)
             vlm_dir = session_dir / "vlm_reports"
             vlm_dir.mkdir(parents=True, exist_ok=True)
 
-            image_only = call_vlm(
-                image_path,
-                "Bu cephe gorselini mimari cephe lejant raporu olarak yorumla. Sayilari tahminse belirt.",
-                api_key=api_key,
-                model=vlm_model,
-            )
-            assisted = call_vlm(
-                image_path,
-                (
-                    "Bu gorsel ve asagidaki YOLO/SAM2 ozetine gore teknik mimari cephe lejant raporu yaz. "
-                    "Sayi olarak sadece total_detections ve class_counts alanlarini kullan.\n\n"
-                    + json.dumps(assisted_payload, ensure_ascii=False, indent=2)
-                ),
-                api_key=api_key,
-                model=vlm_model,
-            )
-            (vlm_dir / "image_only_report.md").write_text(image_only, encoding="utf-8")
-            (vlm_dir / "detection_assisted_report.md").write_text(assisted, encoding="utf-8")
-            (vlm_dir / "payload.json").write_text(json.dumps(assisted_payload, ensure_ascii=False, indent=2), encoding="utf-8")
-            insert_artifact(self.db_path, session_id, "report", "vlm_image_only", vlm_dir / "image_only_report.md")
-            insert_artifact(
-                self.db_path,
-                session_id,
-                "report",
-                "vlm_detection_assisted",
-                vlm_dir / "detection_assisted_report.md",
-            )
-            reports_md.extend(["## VLM Image-only", image_only, "", "## VLM Detection-assisted", assisted, ""])
-            target_names.extend(["vlm_image_only", "vlm_detection_assisted"])
+            if vlm_image_only:
+                image_only = call_vlm(
+                    image_path,
+                    "Bu cephe gorselini mimari cephe lejant raporu olarak yorumla. Sayilari tahminse belirt.",
+                    api_key=api_key,
+                    model=vlm_model,
+                )
+                save_vlm_report(self.db_path, session_id, vlm_dir, "vlm_image_only", image_only)
+                reports_md.extend(["## VLM - Sadece Gorsel", image_only, ""])
+                target_names.append("vlm_image_only")
+
+            if vlm_yolo:
+                yolo_report = call_vlm(
+                    image_path,
+                    (
+                        "Bu gorsel ve asagidaki YOLO model ciktilarina gore mimari cephe lejant raporu yaz. "
+                        "Sayi olarak sadece total_detections ve class_counts alanlarini kullan. "
+                        "YOLO versiyonlarini kisa karsilastir.\n\n"
+                        + json.dumps(yolo_payload, ensure_ascii=False, indent=2)
+                    ),
+                    api_key=api_key,
+                    model=vlm_model,
+                )
+                save_vlm_report(self.db_path, session_id, vlm_dir, "vlm_yolo_assisted", yolo_report, yolo_payload)
+                reports_md.extend(["## VLM - YOLO Ozetli", yolo_report, ""])
+                target_names.append("vlm_yolo_assisted")
+
+            if vlm_sam:
+                sam_payload = {
+                    "instruction": "Use hybrid_yolo_sam2 counts as the SAM2-refined mask result. SAM2 is prompted by YOLO boxes.",
+                    "sam2_refined": assisted_payload["hybrid_yolo_sam2"],
+                }
+                sam_report = call_vlm(
+                    image_path,
+                    (
+                        "Bu gorsel ve SAM2 ile iyilestirilmis maske ozetine gore cephe lejant raporu yaz. "
+                        "SAM2 sonucunun YOLO kutulari ile yonlendirildigini belirt. "
+                        "Sayi olarak sadece total_detections ve class_counts alanlarini kullan.\n\n"
+                        + json.dumps(sam_payload, ensure_ascii=False, indent=2)
+                    ),
+                    api_key=api_key,
+                    model=vlm_model,
+                )
+                save_vlm_report(self.db_path, session_id, vlm_dir, "vlm_sam2_assisted", sam_report, sam_payload)
+                reports_md.extend(["## VLM - SAM2 Ozetli", sam_report, ""])
+                target_names.append("vlm_sam2_assisted")
+
+            if vlm_hybrid:
+                hybrid_report = call_vlm(
+                    image_path,
+                    (
+                        "Bu gorsel ve asagidaki YOLO + SAM2 hibrit ozetine gore teknik mimari cephe lejant raporu yaz. "
+                        "Raw YOLO, filtrelenmis YOLO ve SAM2 ile iyilestirilmis sonucu ayri ayri yorumla. "
+                        "Sayi olarak sadece total_detections ve class_counts alanlarini kullan.\n\n"
+                        + json.dumps(assisted_payload, ensure_ascii=False, indent=2)
+                    ),
+                    api_key=api_key,
+                    model=vlm_model,
+                )
+                save_vlm_report(self.db_path, session_id, vlm_dir, "vlm_hybrid_yolo_sam2", hybrid_report, assisted_payload)
+                reports_md.extend(["## VLM - YOLO + SAM2 Hibrit", hybrid_report, ""])
+                target_names.append("vlm_hybrid_yolo_sam2")
 
         summary_path = session_dir / "session_summary.md"
         summary_path.write_text("\n".join(reports_md), encoding="utf-8")
@@ -452,7 +530,19 @@ class EvaluationRunner:
 def build_app(runner: EvaluationRunner):
     import gradio as gr
 
-    def run_clicked(image_file, api_key, vlm_model, run_v1, run_v2, run_v3, run_hybrid, run_vlm):
+    def run_clicked(
+        image_file,
+        api_key,
+        vlm_model,
+        run_v1,
+        run_v2,
+        run_v3,
+        run_hybrid,
+        vlm_image_only,
+        vlm_yolo,
+        vlm_sam,
+        vlm_hybrid,
+    ):
         if image_file is None:
             raise gr.Error("Once bir gorsel yukle.")
         try:
@@ -464,7 +554,10 @@ def build_app(runner: EvaluationRunner):
                 run_v2=run_v2,
                 run_v3=run_v3,
                 run_hybrid=run_hybrid,
-                run_vlm=run_vlm,
+                vlm_image_only=vlm_image_only,
+                vlm_yolo=vlm_yolo,
+                vlm_sam=vlm_sam,
+                vlm_hybrid=vlm_hybrid,
             )
             return session_id, gallery, report, db_path, gr.update(choices=targets, value="overall")
         except Exception as exc:
@@ -485,12 +578,17 @@ def build_app(runner: EvaluationRunner):
             with gr.Column(scale=1):
                 image = gr.Image(label="Test image", type="filepath")
                 api_key = gr.Textbox(label="OpenAI API key", type="password")
-                vlm_model = gr.Textbox(label="VLM model", value="gpt-4o")
+                vlm_model = gr.Dropdown(label="VLM model", choices=VLM_MODELS, value="gpt-4o", allow_custom_value=True)
+                gr.Markdown("### Model ciktilari")
                 run_v1 = gr.Checkbox(label="YOLO v1", value=True)
                 run_v2 = gr.Checkbox(label="YOLO v2", value=True)
                 run_v3 = gr.Checkbox(label="YOLO v3", value=True)
-                run_hybrid = gr.Checkbox(label="Hybrid YOLO + SAM2", value=True)
-                run_vlm = gr.Checkbox(label="VLM reports", value=True)
+                run_hybrid = gr.Checkbox(label="SAM2 / Hybrid YOLO + SAM2", value=True)
+                gr.Markdown("### VLM rapor tipleri")
+                vlm_image_only = gr.Checkbox(label="Sadece resmi VLM'e ver", value=True)
+                vlm_yolo = gr.Checkbox(label="Resim + YOLO sonuclarini VLM'e ver", value=True)
+                vlm_sam = gr.Checkbox(label="Resim + SAM2 sonucunu VLM'e ver", value=True)
+                vlm_hybrid = gr.Checkbox(label="Resim + YOLO + SAM2 hibrit sonucu VLM'e ver", value=True)
                 run_button = gr.Button("Run evaluation", variant="primary")
             with gr.Column(scale=2):
                 gallery = gr.Gallery(label="Result visuals", columns=2, height=520)
@@ -507,7 +605,19 @@ def build_app(runner: EvaluationRunner):
 
         run_button.click(
             run_clicked,
-            inputs=[image, api_key, vlm_model, run_v1, run_v2, run_v3, run_hybrid, run_vlm],
+            inputs=[
+                image,
+                api_key,
+                vlm_model,
+                run_v1,
+                run_v2,
+                run_v3,
+                run_hybrid,
+                vlm_image_only,
+                vlm_yolo,
+                vlm_sam,
+                vlm_hybrid,
+            ],
             outputs=[session_state, gallery, report, db_path, target],
         )
         save_button.click(save_rating_clicked, inputs=[session_state, target, score, comment], outputs=[save_status])
