@@ -33,6 +33,21 @@ from evaluation_interface import (
 )
 
 
+def feedback_title_static(target_name: str) -> str:
+    titles = {
+        "overall": "Genel yorum ve puan",
+        "yolo_v1_default": "YOLO v1 sonucu",
+        "yolo_v2_aug_controlled": "YOLO v2 augmentasyonlu sonuc",
+        "yolo_v3_no_erasing": "YOLO v3 no-erasing sonuc",
+        "hybrid_yolo_sam2": "Hibrit YOLO + SAM2 sonucu",
+        "vlm_image_only": "LLM raporu: sadece resim",
+        "vlm_yolo_assisted": "LLM raporu: resim + YOLO tespit ozeti",
+        "vlm_sam2_assisted": "LLM raporu: resim + SAM2 rafine ozeti",
+        "vlm_hybrid_yolo_sam2": "LLM raporu: resim + hibrit YOLO + SAM2 ozeti",
+    }
+    return titles.get(target_name, target_name)
+
+
 def make_visual_summary(gallery: list[tuple[str, str]], out_path: Path, thumb_size: tuple[int, int] = (360, 240)) -> Path | None:
     try:
         from PIL import Image, ImageDraw, ImageFont
@@ -89,6 +104,8 @@ def write_combined_report(
     visual_summary: Path | None,
     report_md: str,
     feedback_lines: list[str] | None = None,
+    target_details: list[dict[str, str]] | None = None,
+    feedback_map: dict[str, dict[str, str | float | None]] | None = None,
 ) -> Path:
     parts = [
         "# Birlesik Cephe Lejant Raporu",
@@ -99,8 +116,33 @@ def write_combined_report(
     if visual_summary:
         rel_visual = visual_summary.relative_to(session_dir)
         parts.extend(["## Toplu Gorsel Sonuc", "", f"![Toplu gorsel sonuc]({rel_visual.as_posix()})", "", "----", ""])
-    parts.extend(["## Cephe Raporlari", "", report_md, ""])
-    if feedback_lines:
+    if target_details:
+        parts.extend(["## Sonuc Detaylari", ""])
+        for detail in target_details:
+            target = detail.get("target", "")
+            title = detail.get("title", target)
+            image = detail.get("image", "")
+            content = detail.get("content", "")
+            parts.extend([f"### {title}", ""])
+            if target:
+                parts.extend([f"Target: `{target}`", ""])
+            if image:
+                try:
+                    rel_image = Path(image).relative_to(session_dir).as_posix()
+                except ValueError:
+                    rel_image = image
+                parts.extend([f"![{title}]({rel_image})", ""])
+            if content:
+                parts.extend([content, ""])
+            feedback = (feedback_map or {}).get(target)
+            if feedback:
+                score = feedback.get("score")
+                comment = feedback.get("comment") or "no feedback"
+                parts.extend(["**Puan ve yorum**", "", f"- Puan: `{score if score is not None else 'no feedback'}`", f"- Yorum: {comment}", ""])
+            parts.extend(["----", ""])
+    else:
+        parts.extend(["## Cephe Raporlari", "", report_md, ""])
+    if feedback_lines and not target_details:
         parts.extend(["----", "", "## Puan ve Yorum Ozeti", "", *feedback_lines, ""])
     out_path = session_dir / "combined_report.md"
     out_path.write_text("\n".join(parts), encoding="utf-8")
@@ -284,7 +326,7 @@ class LiveEvaluationRunner(EvaluationRunner):
         vlm_sam: bool,
         vlm_hybrid: bool,
         log_callback: Any | None = None,
-    ) -> tuple[str, list[tuple[str, str]], str, str, list[str], str]:
+    ) -> tuple[str, list[tuple[str, str]], str, str, list[str], list[dict[str, str]], str]:
         debug_log: list[str] = []
 
         def emit(message: str) -> None:
@@ -342,16 +384,26 @@ class LiveEvaluationRunner(EvaluationRunner):
         ]
         gallery: list[tuple[str, str]] = [(str(image_path), "input")]
         target_names: list[str] = []
+        target_details: list[dict[str, str]] = []
         for result in results:
-            reports_md.append(f"## Tespit Ozeti: {result['name']}")
-            reports_md.append(f"Durum: {result['status']}")
+            section = [f"## Tespit Ozeti: {result['name']}", f"Durum: {result['status']}"]
             if result.get("json"):
                 counts = detection_counts(one_record(result["json"]))
-                reports_md.append(f"Tespit ozeti: `{json.dumps(counts, ensure_ascii=False)}`")
+                section.append(f"Tespit ozeti: `{json.dumps(counts, ensure_ascii=False)}`")
+            reports_md.extend(section)
             reports_md.extend(["", "----", ""])
+            visual_path = str(result["visual"]) if result.get("visual") else ""
             if result.get("visual"):
                 gallery.append((str(result["visual"]), result["name"]))
             target_names.append(result["name"])
+            target_details.append(
+                {
+                    "target": result["name"],
+                    "title": feedback_title_static(result["name"]),
+                    "image": visual_path,
+                    "content": "\n".join(section),
+                }
+            )
 
         if any([vlm_image_only, vlm_yolo, vlm_sam, vlm_hybrid]):
             emit("VLM raporlama basliyor...")
@@ -374,6 +426,7 @@ class LiveEvaluationRunner(EvaluationRunner):
                 save_vlm_report(self.db_path, session_id, vlm_dir, "vlm_image_only", image_only)
                 reports_md.extend(["## Sadece Resim ile LLM Cephe Raporu", image_only, "", "----", ""])
                 target_names.append("vlm_image_only")
+                target_details.append({"target": "vlm_image_only", "title": feedback_title_static("vlm_image_only"), "image": str(image_path), "content": image_only})
             if vlm_yolo:
                 emit("VLM YOLO destekli rapor uretiliyor...")
                 yolo_report = call_vlm(
@@ -386,6 +439,7 @@ class LiveEvaluationRunner(EvaluationRunner):
                 save_vlm_report(self.db_path, session_id, vlm_dir, "vlm_yolo_assisted", yolo_report, yolo_payload)
                 reports_md.extend(["## YOLO Tespit Ozeti ile LLM Cephe Raporu", yolo_report, "", "----", ""])
                 target_names.append("vlm_yolo_assisted")
+                target_details.append({"target": "vlm_yolo_assisted", "title": feedback_title_static("vlm_yolo_assisted"), "image": str(image_path), "content": yolo_report})
             if vlm_sam:
                 emit("VLM SAM2 destekli rapor uretiliyor...")
                 sam_payload = {"instruction": "Use hybrid_yolo_sam2 counts as the SAM2-refined mask result. SAM2 is prompted by YOLO boxes.", "sam2_refined": assisted_payload["hybrid_yolo_sam2"]}
@@ -399,6 +453,7 @@ class LiveEvaluationRunner(EvaluationRunner):
                 save_vlm_report(self.db_path, session_id, vlm_dir, "vlm_sam2_assisted", sam_report, sam_payload)
                 reports_md.extend(["## SAM2 Rafine Cikti ile LLM Cephe Raporu", sam_report, "", "----", ""])
                 target_names.append("vlm_sam2_assisted")
+                target_details.append({"target": "vlm_sam2_assisted", "title": feedback_title_static("vlm_sam2_assisted"), "image": str(image_path), "content": sam_report})
             if vlm_hybrid:
                 emit("VLM hybrid raporu uretiliyor...")
                 hybrid_report = call_vlm(
@@ -411,6 +466,7 @@ class LiveEvaluationRunner(EvaluationRunner):
                 save_vlm_report(self.db_path, session_id, vlm_dir, "vlm_hybrid_yolo_sam2", hybrid_report, assisted_payload)
                 reports_md.extend(["## Hibrit YOLO + SAM2 Cikti ile LLM Cephe Raporu", hybrid_report, "", "----", ""])
                 target_names.append("vlm_hybrid_yolo_sam2")
+                target_details.append({"target": "vlm_hybrid_yolo_sam2", "title": feedback_title_static("vlm_hybrid_yolo_sam2"), "image": str(image_path), "content": hybrid_report})
 
         visual_summary = make_visual_summary(gallery, session_dir / "visual_summary.jpg")
         if visual_summary:
@@ -418,15 +474,23 @@ class LiveEvaluationRunner(EvaluationRunner):
             insert_artifact(self.db_path, session_id, "image", "visual_summary", visual_summary)
 
         target_names.append("overall")
+        target_details.append(
+            {
+                "target": "overall",
+                "title": feedback_title_static("overall"),
+                "image": str(visual_summary) if visual_summary else str(image_path),
+                "content": "Genel degerlendirme ve kullanici yorumu icin ayrilan bolum.",
+            }
+        )
         summary_path = session_dir / "session_summary.md"
         summary_path.write_text("\n".join(reports_md), encoding="utf-8")
         insert_artifact(self.db_path, session_id, "report", "session_summary", summary_path)
-        combined_path = write_combined_report(session_dir, session_id, visual_summary, "\n".join(reports_md))
+        combined_path = write_combined_report(session_dir, session_id, visual_summary, "\n".join(reports_md), target_details=target_details)
         insert_artifact(self.db_path, session_id, "report", "combined_report", combined_path)
         emit(f"Summary: {summary_path}")
         emit(f"Combined report: {combined_path}")
         emit(f"SQLite DB: {self.db_path}")
-        return session_id, gallery, "\n".join(reports_md), str(self.db_path), target_names, "\n".join(debug_log)
+        return session_id, gallery, "\n".join(reports_md), str(self.db_path), target_names, target_details, "\n".join(debug_log)
 
 
 def build_app(runner: EvaluationRunner):
@@ -436,29 +500,24 @@ def build_app(runner: EvaluationRunner):
     feedback_slots = 9
 
     def feedback_title(target_name: str) -> str:
-        titles = {
-            "overall": "Genel yorum ve puan",
-            "yolo_v1_default": "YOLO v1 sonucu",
-            "yolo_v2_aug_controlled": "YOLO v2 augmentasyonlu sonuc",
-            "yolo_v3_no_erasing": "YOLO v3 no-erasing sonuc",
-            "hybrid_yolo_sam2": "Hibrit YOLO + SAM2 sonucu",
-            "vlm_image_only": "LLM raporu: sadece resim",
-            "vlm_yolo_assisted": "LLM raporu: resim + YOLO tespit ozeti",
-            "vlm_sam2_assisted": "LLM raporu: resim + SAM2 rafine ozeti",
-            "vlm_hybrid_yolo_sam2": "LLM raporu: resim + hibrit YOLO + SAM2 ozeti",
-        }
-        return titles.get(target_name, target_name)
+        return feedback_title_static(target_name)
 
-    def feedback_updates(targets: list[str] | None):
-        ordered = list(targets or [])
+    def tab_updates(details: list[dict[str, str]] | None):
+        ordered = list(details or [])
         updates = []
         for index in range(feedback_slots):
             if index < len(ordered):
-                title = feedback_title(ordered[index])
+                detail = ordered[index]
+                target = detail.get("target", "")
+                title = detail.get("title") or feedback_title(target)
+                image_path = detail.get("image") or None
+                content = detail.get("content") or ""
                 updates.extend(
                     [
-                        gr.update(visible=True),
-                        gr.update(value=f"### {title}\n`{ordered[index]}`", visible=True),
+                        gr.update(label=title[:28], visible=True),
+                        gr.update(value=f"### {title}\n`{target}`", visible=True),
+                        gr.update(value=image_path, visible=bool(image_path)),
+                        gr.update(value=content, visible=True),
                         gr.update(value=0, visible=True),
                         gr.update(value="", visible=True),
                     ]
@@ -467,6 +526,8 @@ def build_app(runner: EvaluationRunner):
                 updates.extend(
                     [
                         gr.update(visible=False),
+                        gr.update(value="", visible=False),
+                        gr.update(value=None, visible=False),
                         gr.update(value="", visible=False),
                         gr.update(value=0, visible=False),
                         gr.update(value="", visible=False),
@@ -524,7 +585,8 @@ def build_app(runner: EvaluationRunner):
             str(runner.db_path),
             "\n".join(logs),
             [],
-            *feedback_updates([]),
+            [],
+            *tab_updates([]),
         )
 
         while thread.is_alive():
@@ -540,7 +602,8 @@ def build_app(runner: EvaluationRunner):
                 str(runner.db_path),
                 "\n".join(logs[-250:]),
                 [],
-                *feedback_updates([]),
+                [],
+                *tab_updates([]),
             )
             time.sleep(0.5)
 
@@ -560,11 +623,12 @@ def build_app(runner: EvaluationRunner):
                 str(runner.db_path),
                 "\n".join(logs[-300:]),
                 [],
-                *feedback_updates([]),
+                [],
+                *tab_updates([]),
             )
             return
 
-        session_id, gallery, report, db_path, targets, debug_log = result_box["value"]  # type: ignore[misc]
+        session_id, gallery, report, db_path, targets, target_details, debug_log = result_box["value"]  # type: ignore[misc]
         logs.append("Calisma tamamlandi.")
         if debug_log:
             logs.extend(str(debug_log).splitlines())
@@ -575,21 +639,25 @@ def build_app(runner: EvaluationRunner):
             db_path,
             "\n".join(logs[-300:]),
             targets,
-            *feedback_updates(targets),
+            target_details,
+            *tab_updates(target_details),
         )
 
-    def save_all_feedback_clicked(session_id, targets, *values):
+    def save_all_feedback_clicked(session_id, targets, target_details, *values):
         if not session_id:
             raise gr.Error("Once bir test oturumu calistir.")
         saved = []
         feedback_lines = []
         target_list = list(targets or [])
+        details = list(target_details or [])
+        feedback_map: dict[str, dict[str, str | float | None]] = {}
         for index, target_name in enumerate(target_list[:feedback_slots]):
             score = values[index * 2]
             comment = (values[index * 2 + 1] or "").strip()
             numeric_score = float(score) if score and float(score) > 0 else None
             stored_comment = comment or ("no feedback" if numeric_score is None else "no comment")
             insert_rating(runner.db_path, session_id, target_name, numeric_score, stored_comment)
+            feedback_map[target_name] = {"score": numeric_score, "comment": stored_comment}
             saved.append(f"{target_name}: {numeric_score if numeric_score is not None else 'no feedback'}")
             feedback_lines.append(f"- **{feedback_title(target_name)}** (`{target_name}`): puan = `{numeric_score if numeric_score is not None else 'no feedback'}`; yorum = {stored_comment}")
         if not saved:
@@ -606,6 +674,8 @@ def build_app(runner: EvaluationRunner):
             visual_summary if visual_summary.exists() else None,
             report_md,
             feedback_lines,
+            target_details=details,
+            feedback_map=feedback_map,
         )
         insert_artifact(runner.db_path, session_id, "report", "feedback_summary", feedback_path)
         insert_artifact(runner.db_path, session_id, "report", "combined_report_with_feedback", combined_path)
@@ -622,6 +692,7 @@ def build_app(runner: EvaluationRunner):
         gr.Markdown("Resim yukle, modelleri calistir, raporlari gor, puan ve yorumlari Drive SQLite DB'ye kaydet.")
         session_state = gr.State("")
         feedback_targets_state = gr.State([])
+        target_details_state = gr.State([])
         with gr.Row():
             with gr.Column(scale=1):
                 image = gr.Image(label="Test image", type="filepath")
@@ -645,19 +716,23 @@ def build_app(runner: EvaluationRunner):
                 run_button = gr.Button("Run evaluation", variant="primary")
             with gr.Column(scale=2):
                 gallery = gr.Gallery(label="Result visuals", columns=2, height=520)
-                report = gr.Markdown(label="Reports")
+                with gr.Accordion("Ham rapor onizleme", open=False):
+                    report = gr.Markdown(label="Reports")
                 db_path = gr.Textbox(label="SQLite DB path")
                 debug_log = gr.Textbox(label="Terminal / Debug log", lines=18, autoscroll=True)
 
-        gr.Markdown("## Puan ve Yorum")
-        gr.Markdown("Her ciktinin altinda ayri puan ve yorum var. Puan `0` ise sistem bunu `no feedback` olarak kaydeder.")
+        gr.Markdown("## Sonuc Sekmeleri, Puan ve Yorum")
+        gr.Markdown("Ustte toplu gorsel kalsin; burada her cikti ayri sekmede incelenir. Kaydet'e basinca rapor puan/yorumlarla yeniden yazilir.")
         feedback_components = []
-        for _ in range(feedback_slots):
-            with gr.Group(visible=False) as feedback_group:
-                label = gr.Markdown()
-                score = gr.Slider(label="Puan (0 = no feedback, 1-5 = degerlendirme)", minimum=0, maximum=5, step=1, value=0)
-                comment = gr.Textbox(label="Yorum (opsiyonel)", lines=3)
-                feedback_components.extend([feedback_group, label, score, comment])
+        with gr.Tabs():
+            for index in range(feedback_slots):
+                with gr.Tab(f"Sonuc {index + 1}", visible=False) as result_tab:
+                    label = gr.Markdown()
+                    result_image = gr.Image(label="Cikti gorseli", type="filepath", height=360)
+                    result_content = gr.Markdown()
+                    score = gr.Slider(label="Puan (0 = no feedback, 1-5 = degerlendirme)", minimum=0, maximum=5, step=1, value=0)
+                    comment = gr.Textbox(label="Yorum (opsiyonel)", lines=3)
+                    feedback_components.extend([result_tab, label, result_image, result_content, score, comment])
         save_button = gr.Button("Tum puan/yorumlari kaydet")
         save_status = gr.Textbox(label="Save status")
 
@@ -676,11 +751,11 @@ def build_app(runner: EvaluationRunner):
                 vlm_sam,
                 vlm_hybrid,
             ],
-            outputs=[session_state, gallery, report, db_path, debug_log, feedback_targets_state, *feedback_components],
+            outputs=[session_state, gallery, report, db_path, debug_log, feedback_targets_state, target_details_state, *feedback_components],
         )
-        save_inputs = [session_state, feedback_targets_state]
+        save_inputs = [session_state, feedback_targets_state, target_details_state]
         for index in range(feedback_slots):
-            save_inputs.extend([feedback_components[index * 4 + 2], feedback_components[index * 4 + 3]])
+            save_inputs.extend([feedback_components[index * 6 + 4], feedback_components[index * 6 + 5]])
         save_button.click(save_all_feedback_clicked, inputs=save_inputs, outputs=[save_status])
     return app
 
