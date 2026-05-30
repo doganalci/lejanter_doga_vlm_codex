@@ -252,16 +252,29 @@ class LiveEvaluationRunner(EvaluationRunner):
             if run_hybrid:
                 results.append(hybrid_result)
 
-        reports_md = ["# Evaluation Results", "", f"Session: `{session_id}`", ""]
+        reports_md = [
+            "# Cephe Lejant Raporu",
+            "",
+            f"Session: `{session_id}`",
+            "",
+            "## Kullanilan Yontemler",
+            "- YOLO segmentasyon modelleri ile cephe elemanlari tespit edildi.",
+            "- SAM2, YOLO tespitlerinden gelen maskeleri gorsel olarak rafine etmek icin kullanildi.",
+            "- LLM/VLM, model ciktilarini mimari cephe lejant raporuna donusturmek icin kullanildi.",
+            "- Sayisal adetlerde model JSON ciktilari esas alindi; LLM'den yeni sayi uydurmasi istenmedi.",
+            "",
+            "----",
+            "",
+        ]
         gallery: list[tuple[str, str]] = [(str(image_path), "input")]
         target_names = ["overall"]
         for result in results:
-            reports_md.append(f"## {result['name']}")
-            reports_md.append(f"Status: {result['status']}")
+            reports_md.append(f"## Tespit Ozeti: {result['name']}")
+            reports_md.append(f"Durum: {result['status']}")
             if result.get("json"):
                 counts = detection_counts(one_record(result["json"]))
-                reports_md.append(f"Detections: `{json.dumps(counts, ensure_ascii=False)}`")
-            reports_md.append("")
+                reports_md.append(f"Tespit ozeti: `{json.dumps(counts, ensure_ascii=False)}`")
+            reports_md.extend(["", "----", ""])
             if result.get("visual"):
                 gallery.append((str(result["visual"]), result["name"]))
             target_names.append(result["name"])
@@ -278,46 +291,51 @@ class LiveEvaluationRunner(EvaluationRunner):
             vlm_dir.mkdir(parents=True, exist_ok=True)
             if vlm_image_only:
                 emit("VLM image-only raporu uretiliyor...")
-                image_only = call_vlm(image_path, "Bu cephe gorselini mimari cephe lejant raporu olarak yorumla. Sayilari tahminse belirt.", api_key=api_key, model=vlm_model)
+                image_only = call_vlm(
+                    image_path,
+                    "Bu gorsel icin bina/cephe odakli mimari cephe lejant raporu yaz. Model veya algoritma anlatma. Cephede gorulen elemanlari, malzemeleri, cephe duzenini, olasi koruma/restorasyon acisindan dikkat ceken noktalari yorumla. Sayilar tahminse acikca tahmini oldugunu belirt.",
+                    api_key=api_key,
+                    model=vlm_model,
+                )
                 save_vlm_report(self.db_path, session_id, vlm_dir, "vlm_image_only", image_only)
-                reports_md.extend(["## VLM - Sadece Gorsel", image_only, ""])
+                reports_md.extend(["## Sadece Resim ile LLM Cephe Raporu", image_only, "", "----", ""])
                 target_names.append("vlm_image_only")
             if vlm_yolo:
                 emit("VLM YOLO destekli rapor uretiliyor...")
                 yolo_report = call_vlm(
                     image_path,
-                    "Bu gorsel ve asagidaki YOLO model ciktilarina gore mimari cephe lejant raporu yaz. Sayi olarak sadece total_detections ve class_counts alanlarini kullan. YOLO versiyonlarini kisa karsilastir.\n\n"
+                    "Bu gorsel ve asagidaki tespit ozeti ile bina/cephe odakli mimari cephe lejant raporu yaz. Algoritma karsilastirmasi yapma; yalnizca raporun basinda 'YOLO tespit ozeti kullanildi' diye kisa belirt. Sayi olarak sadece total_detections ve class_counts alanlarini kullan. Cephe elemanlarini, malzeme izlenimlerini, cephe duzenini ve koruma/restorasyon acisindan yorumlari acikla.\n\n"
                     + json.dumps(yolo_payload, ensure_ascii=False, indent=2),
                     api_key=api_key,
                     model=vlm_model,
                 )
                 save_vlm_report(self.db_path, session_id, vlm_dir, "vlm_yolo_assisted", yolo_report, yolo_payload)
-                reports_md.extend(["## VLM - YOLO Ozetli", yolo_report, ""])
+                reports_md.extend(["## YOLO Tespit Ozeti ile LLM Cephe Raporu", yolo_report, "", "----", ""])
                 target_names.append("vlm_yolo_assisted")
             if vlm_sam:
                 emit("VLM SAM2 destekli rapor uretiliyor...")
                 sam_payload = {"instruction": "Use hybrid_yolo_sam2 counts as the SAM2-refined mask result. SAM2 is prompted by YOLO boxes.", "sam2_refined": assisted_payload["hybrid_yolo_sam2"]}
                 sam_report = call_vlm(
                     image_path,
-                    "Bu gorsel ve SAM2 ile iyilestirilmis maske ozetine gore cephe lejant raporu yaz. SAM2 sonucunun YOLO kutulari ile yonlendirildigini belirt. Sayi olarak sadece total_detections ve class_counts alanlarini kullan.\n\n"
+                    "Bu gorsel ve asagidaki rafine tespit ozeti ile bina/cephe odakli mimari cephe lejant raporu yaz. Algoritma detaylarina girme; yalnizca raporun basinda 'SAM2 ile rafine edilmis tespit ozeti kullanildi' diye kisa belirt. Sayi olarak sadece total_detections ve class_counts alanlarini kullan. Cephedeki elemanlari, malzemeleri ve cephe karakterini yorumla.\n\n"
                     + json.dumps(sam_payload, ensure_ascii=False, indent=2),
                     api_key=api_key,
                     model=vlm_model,
                 )
                 save_vlm_report(self.db_path, session_id, vlm_dir, "vlm_sam2_assisted", sam_report, sam_payload)
-                reports_md.extend(["## VLM - SAM2 Ozetli", sam_report, ""])
+                reports_md.extend(["## SAM2 Rafine Cikti ile LLM Cephe Raporu", sam_report, "", "----", ""])
                 target_names.append("vlm_sam2_assisted")
             if vlm_hybrid:
                 emit("VLM hybrid raporu uretiliyor...")
                 hybrid_report = call_vlm(
                     image_path,
-                    "Bu gorsel ve asagidaki YOLO + SAM2 hibrit ozetine gore teknik mimari cephe lejant raporu yaz. Raw YOLO, filtrelenmis YOLO ve SAM2 ile iyilestirilmis sonucu ayri ayri yorumla. Sayi olarak sadece total_detections ve class_counts alanlarini kullan.\n\n"
+                    "Bu gorsel ve asagidaki hibrit tespit ozeti ile bina/cephe odakli mimari cephe lejant raporu yaz. Algoritma ayrintilarina girme; yalnizca raporun basinda 'hibrit YOLO+SAM2 tespit ozeti kullanildi' diye kisa belirt. Sayi olarak sadece total_detections ve class_counts alanlarini kullan. Cephe elemanlari, malzeme karakteri, mimari duzen ve olasi koruma/restorasyon degerlendirmesini anlat.\n\n"
                     + json.dumps(assisted_payload, ensure_ascii=False, indent=2),
                     api_key=api_key,
                     model=vlm_model,
                 )
                 save_vlm_report(self.db_path, session_id, vlm_dir, "vlm_hybrid_yolo_sam2", hybrid_report, assisted_payload)
-                reports_md.extend(["## VLM - YOLO + SAM2 Hibrit", hybrid_report, ""])
+                reports_md.extend(["## Hibrit YOLO + SAM2 Cikti ile LLM Cephe Raporu", hybrid_report, "", "----", ""])
                 target_names.append("vlm_hybrid_yolo_sam2")
 
         summary_path = session_dir / "session_summary.md"
