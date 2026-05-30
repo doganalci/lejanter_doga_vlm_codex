@@ -33,6 +33,80 @@ from evaluation_interface import (
 )
 
 
+def make_visual_summary(gallery: list[tuple[str, str]], out_path: Path, thumb_size: tuple[int, int] = (360, 240)) -> Path | None:
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except Exception:
+        return None
+
+    items: list[tuple[Image.Image, str]] = []
+    for image_name, label in gallery:
+        image_path = Path(image_name)
+        if not image_path.exists():
+            continue
+        try:
+            image = Image.open(image_path).convert("RGB")
+            image.thumbnail(thumb_size)
+            items.append((image.copy(), label))
+        except Exception:
+            continue
+    if not items:
+        return None
+
+    cols = 2 if len(items) <= 4 else 3
+    label_h = 34
+    pad = 18
+    cell_w = thumb_size[0] + pad * 2
+    cell_h = thumb_size[1] + label_h + pad * 2
+    rows = (len(items) + cols - 1) // cols
+    sheet = Image.new("RGB", (cols * cell_w, rows * cell_h), "white")
+    draw = ImageDraw.Draw(sheet)
+    try:
+        font = ImageFont.truetype("Arial.ttf", 18)
+    except Exception:
+        font = ImageFont.load_default()
+
+    for index, (image, label) in enumerate(items):
+        col = index % cols
+        row = index // cols
+        x0 = col * cell_w
+        y0 = row * cell_h
+        draw.rectangle([x0 + 6, y0 + 6, x0 + cell_w - 6, y0 + cell_h - 6], outline=(210, 210, 210), width=2)
+        text = label[:42]
+        draw.text((x0 + pad, y0 + pad), text, fill=(20, 20, 20), font=font)
+        image_x = x0 + pad + (thumb_size[0] - image.width) // 2
+        image_y = y0 + pad + label_h + (thumb_size[1] - image.height) // 2
+        sheet.paste(image, (image_x, image_y))
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    sheet.save(out_path, quality=92)
+    return out_path
+
+
+def write_combined_report(
+    session_dir: Path,
+    session_id: str,
+    visual_summary: Path | None,
+    report_md: str,
+    feedback_lines: list[str] | None = None,
+) -> Path:
+    parts = [
+        "# Birlesik Cephe Lejant Raporu",
+        "",
+        f"Session: `{session_id}`",
+        "",
+    ]
+    if visual_summary:
+        rel_visual = visual_summary.relative_to(session_dir)
+        parts.extend(["## Toplu Gorsel Sonuc", "", f"![Toplu gorsel sonuc]({rel_visual.as_posix()})", "", "----", ""])
+    parts.extend(["## Cephe Raporlari", "", report_md, ""])
+    if feedback_lines:
+        parts.extend(["----", "", "## Puan ve Yorum Ozeti", "", *feedback_lines, ""])
+    out_path = session_dir / "combined_report.md"
+    out_path.write_text("\n".join(parts), encoding="utf-8")
+    return out_path
+
+
 def get_openai_api_key() -> tuple[str, str]:
     env_key = os.environ.get("OPENAI_API_KEY", "").strip()
     if env_key:
@@ -338,11 +412,19 @@ class LiveEvaluationRunner(EvaluationRunner):
                 reports_md.extend(["## Hibrit YOLO + SAM2 Cikti ile LLM Cephe Raporu", hybrid_report, "", "----", ""])
                 target_names.append("vlm_hybrid_yolo_sam2")
 
+        visual_summary = make_visual_summary(gallery, session_dir / "visual_summary.jpg")
+        if visual_summary:
+            gallery.insert(0, (str(visual_summary), "toplu_gorsel_sonuc"))
+            insert_artifact(self.db_path, session_id, "image", "visual_summary", visual_summary)
+
         target_names.append("overall")
         summary_path = session_dir / "session_summary.md"
         summary_path.write_text("\n".join(reports_md), encoding="utf-8")
         insert_artifact(self.db_path, session_id, "report", "session_summary", summary_path)
+        combined_path = write_combined_report(session_dir, session_id, visual_summary, "\n".join(reports_md))
+        insert_artifact(self.db_path, session_id, "report", "combined_report", combined_path)
         emit(f"Summary: {summary_path}")
+        emit(f"Combined report: {combined_path}")
         emit(f"SQLite DB: {self.db_path}")
         return session_id, gallery, "\n".join(reports_md), str(self.db_path), target_names, "\n".join(debug_log)
 
@@ -500,6 +582,7 @@ def build_app(runner: EvaluationRunner):
         if not session_id:
             raise gr.Error("Once bir test oturumu calistir.")
         saved = []
+        feedback_lines = []
         target_list = list(targets or [])
         for index, target_name in enumerate(target_list[:feedback_slots]):
             score = values[index * 2]
@@ -508,9 +591,31 @@ def build_app(runner: EvaluationRunner):
             stored_comment = comment or ("no feedback" if numeric_score is None else "no comment")
             insert_rating(runner.db_path, session_id, target_name, numeric_score, stored_comment)
             saved.append(f"{target_name}: {numeric_score if numeric_score is not None else 'no feedback'}")
+            feedback_lines.append(f"- **{feedback_title(target_name)}** (`{target_name}`): puan = `{numeric_score if numeric_score is not None else 'no feedback'}`; yorum = {stored_comment}")
         if not saved:
             return "Kaydedilecek hedef bulunamadi. Once bir analiz calistir."
-        return "Kaydedildi:\n" + "\n".join(saved) + f"\n\nDB: {runner.db_path}"
+        session_dir = runner.reports_dir / "evaluation_sessions" / session_id
+        feedback_path = session_dir / "feedback_summary.md"
+        feedback_path.write_text("# Puan ve Yorum Ozeti\n\n" + "\n".join(feedback_lines) + "\n", encoding="utf-8")
+        summary_path = session_dir / "session_summary.md"
+        report_md = summary_path.read_text(encoding="utf-8") if summary_path.exists() else ""
+        visual_summary = session_dir / "visual_summary.jpg"
+        combined_path = write_combined_report(
+            session_dir,
+            session_id,
+            visual_summary if visual_summary.exists() else None,
+            report_md,
+            feedback_lines,
+        )
+        insert_artifact(runner.db_path, session_id, "report", "feedback_summary", feedback_path)
+        insert_artifact(runner.db_path, session_id, "report", "combined_report_with_feedback", combined_path)
+        return (
+            "Kaydedildi:\n"
+            + "\n".join(saved)
+            + f"\n\nFeedback: {feedback_path}"
+            + f"\nBirlesik rapor: {combined_path}"
+            + f"\nDB: {runner.db_path}"
+        )
 
     with gr.Blocks(title="Lejanter Evaluation Interface") as app:
         gr.Markdown("# Lejanter Evaluation Interface")
