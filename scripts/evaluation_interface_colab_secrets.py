@@ -267,7 +267,7 @@ class LiveEvaluationRunner(EvaluationRunner):
             "",
         ]
         gallery: list[tuple[str, str]] = [(str(image_path), "input")]
-        target_names = ["overall"]
+        target_names: list[str] = []
         for result in results:
             reports_md.append(f"## Tespit Ozeti: {result['name']}")
             reports_md.append(f"Durum: {result['status']}")
@@ -338,6 +338,7 @@ class LiveEvaluationRunner(EvaluationRunner):
                 reports_md.extend(["## Hibrit YOLO + SAM2 Cikti ile LLM Cephe Raporu", hybrid_report, "", "----", ""])
                 target_names.append("vlm_hybrid_yolo_sam2")
 
+        target_names.append("overall")
         summary_path = session_dir / "session_summary.md"
         summary_path.write_text("\n".join(reports_md), encoding="utf-8")
         insert_artifact(self.db_path, session_id, "report", "session_summary", summary_path)
@@ -350,6 +351,46 @@ def build_app(runner: EvaluationRunner):
     import gradio as gr
 
     auto_api_key, api_key_status = get_openai_api_key()
+    feedback_slots = 9
+
+    def feedback_title(target_name: str) -> str:
+        titles = {
+            "overall": "Genel yorum ve puan",
+            "yolo_v1_default": "YOLO v1 sonucu",
+            "yolo_v2_aug_controlled": "YOLO v2 augmentasyonlu sonuc",
+            "yolo_v3_no_erasing": "YOLO v3 no-erasing sonuc",
+            "hybrid_yolo_sam2": "Hibrit YOLO + SAM2 sonucu",
+            "vlm_image_only": "LLM raporu: sadece resim",
+            "vlm_yolo_assisted": "LLM raporu: resim + YOLO tespit ozeti",
+            "vlm_sam2_assisted": "LLM raporu: resim + SAM2 rafine ozeti",
+            "vlm_hybrid_yolo_sam2": "LLM raporu: resim + hibrit YOLO + SAM2 ozeti",
+        }
+        return titles.get(target_name, target_name)
+
+    def feedback_updates(targets: list[str] | None):
+        ordered = list(targets or [])
+        updates = []
+        for index in range(feedback_slots):
+            if index < len(ordered):
+                title = feedback_title(ordered[index])
+                updates.extend(
+                    [
+                        gr.update(visible=True),
+                        gr.update(value=f"### {title}\n`{ordered[index]}`", visible=True),
+                        gr.update(value=0, visible=True),
+                        gr.update(value="", visible=True),
+                    ]
+                )
+            else:
+                updates.extend(
+                    [
+                        gr.update(visible=False),
+                        gr.update(value="", visible=False),
+                        gr.update(value=0, visible=False),
+                        gr.update(value="", visible=False),
+                    ]
+                )
+        return updates
 
     def run_clicked(
         image_file,
@@ -394,7 +435,15 @@ def build_app(runner: EvaluationRunner):
         thread = threading.Thread(target=worker, daemon=True)
         thread.start()
         logs = ["Calisma basladi. Terminal akisindan sureci izleyebilirsin."]
-        yield "", [], "## Calisiyor\n\nModel ve rapor uretimi devam ediyor.", str(runner.db_path), "\n".join(logs), gr.update(choices=["overall"], value="overall")
+        yield (
+            "",
+            [],
+            "## Calisiyor\n\nModel ve rapor uretimi devam ediyor.",
+            str(runner.db_path),
+            "\n".join(logs),
+            [],
+            *feedback_updates([]),
+        )
 
         while thread.is_alive():
             while True:
@@ -402,7 +451,15 @@ def build_app(runner: EvaluationRunner):
                     logs.append(log_queue.get_nowait())
                 except queue.Empty:
                     break
-            yield "", [], "## Calisiyor\n\nModel ve rapor uretimi devam ediyor.", str(runner.db_path), "\n".join(logs[-250:]), gr.update(choices=["overall"], value="overall")
+            yield (
+                "",
+                [],
+                "## Calisiyor\n\nModel ve rapor uretimi devam ediyor.",
+                str(runner.db_path),
+                "\n".join(logs[-250:]),
+                [],
+                *feedback_updates([]),
+            )
             time.sleep(0.5)
 
         while True:
@@ -414,25 +471,52 @@ def build_app(runner: EvaluationRunner):
         if "error" in result_box:
             error_text = f"## Hata\n\n```text\n{result_box['error']}\n```"
             logs.append("Hata olustu. Ayrinti yukaridaki traceback icinde.")
-            yield "", [], error_text, str(runner.db_path), "\n".join(logs[-300:]), gr.update(choices=["overall"], value="overall")
+            yield (
+                "",
+                [],
+                error_text,
+                str(runner.db_path),
+                "\n".join(logs[-300:]),
+                [],
+                *feedback_updates([]),
+            )
             return
 
         session_id, gallery, report, db_path, targets, debug_log = result_box["value"]  # type: ignore[misc]
         logs.append("Calisma tamamlandi.")
         if debug_log:
             logs.extend(str(debug_log).splitlines())
-        yield session_id, gallery, report, db_path, "\n".join(logs[-300:]), gr.update(choices=targets, value="overall")
+        yield (
+            session_id,
+            gallery,
+            report,
+            db_path,
+            "\n".join(logs[-300:]),
+            targets,
+            *feedback_updates(targets),
+        )
 
-    def save_rating_clicked(session_id, target_name, score, comment):
+    def save_all_feedback_clicked(session_id, targets, *values):
         if not session_id:
             raise gr.Error("Once bir test oturumu calistir.")
-        insert_rating(runner.db_path, session_id, target_name or "overall", score, comment or "")
-        return f"Saved rating for {target_name or 'overall'} in {runner.db_path}"
+        saved = []
+        target_list = list(targets or [])
+        for index, target_name in enumerate(target_list[:feedback_slots]):
+            score = values[index * 2]
+            comment = (values[index * 2 + 1] or "").strip()
+            numeric_score = float(score) if score and float(score) > 0 else None
+            stored_comment = comment or ("no feedback" if numeric_score is None else "no comment")
+            insert_rating(runner.db_path, session_id, target_name, numeric_score, stored_comment)
+            saved.append(f"{target_name}: {numeric_score if numeric_score is not None else 'no feedback'}")
+        if not saved:
+            return "Kaydedilecek hedef bulunamadi. Once bir analiz calistir."
+        return "Kaydedildi:\n" + "\n".join(saved) + f"\n\nDB: {runner.db_path}"
 
     with gr.Blocks(title="Lejanter Evaluation Interface") as app:
         gr.Markdown("# Lejanter Evaluation Interface")
         gr.Markdown("Resim yukle, modelleri calistir, raporlari gor, puan ve yorumlari Drive SQLite DB'ye kaydet.")
         session_state = gr.State("")
+        feedback_targets_state = gr.State([])
         with gr.Row():
             with gr.Column(scale=1):
                 image = gr.Image(label="Test image", type="filepath")
@@ -460,12 +544,16 @@ def build_app(runner: EvaluationRunner):
                 db_path = gr.Textbox(label="SQLite DB path")
                 debug_log = gr.Textbox(label="Terminal / Debug log", lines=18, autoscroll=True)
 
-        gr.Markdown("## Rating")
-        with gr.Row():
-            target = gr.Dropdown(label="Target", choices=["overall"], value="overall")
-            score = gr.Slider(label="Score", minimum=1, maximum=5, step=1, value=3)
-        comment = gr.Textbox(label="Comment", lines=4)
-        save_button = gr.Button("Save rating/comment")
+        gr.Markdown("## Puan ve Yorum")
+        gr.Markdown("Her ciktinin altinda ayri puan ve yorum var. Puan `0` ise sistem bunu `no feedback` olarak kaydeder.")
+        feedback_components = []
+        for _ in range(feedback_slots):
+            with gr.Group(visible=False) as feedback_group:
+                label = gr.Markdown()
+                score = gr.Slider(label="Puan (0 = no feedback, 1-5 = degerlendirme)", minimum=0, maximum=5, step=1, value=0)
+                comment = gr.Textbox(label="Yorum (opsiyonel)", lines=3)
+                feedback_components.extend([feedback_group, label, score, comment])
+        save_button = gr.Button("Tum puan/yorumlari kaydet")
         save_status = gr.Textbox(label="Save status")
 
         run_button.click(
@@ -483,9 +571,12 @@ def build_app(runner: EvaluationRunner):
                 vlm_sam,
                 vlm_hybrid,
             ],
-            outputs=[session_state, gallery, report, db_path, debug_log, target],
+            outputs=[session_state, gallery, report, db_path, debug_log, feedback_targets_state, *feedback_components],
         )
-        save_button.click(save_rating_clicked, inputs=[session_state, target, score, comment], outputs=[save_status])
+        save_inputs = [session_state, feedback_targets_state]
+        for index in range(feedback_slots):
+            save_inputs.extend([feedback_components[index * 4 + 2], feedback_components[index * 4 + 3]])
+        save_button.click(save_all_feedback_clicked, inputs=save_inputs, outputs=[save_status])
     return app
 
 
