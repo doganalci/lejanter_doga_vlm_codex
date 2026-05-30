@@ -32,47 +32,141 @@ from evaluation_interface import (
     save_vlm_report,
 )
 
+CLASS_COLORS = [
+    (31, 119, 180), (255, 127, 14), (44, 160, 44), (214, 39, 40),
+    (148, 103, 189), (140, 86, 75), (227, 119, 194), (127, 127, 127),
+    (188, 189, 34), (23, 190, 207), (57, 59, 121), (82, 84, 163),
+    (107, 110, 207), (156, 158, 222), (99, 121, 57), (140, 162, 82),
+    (181, 207, 107), (206, 219, 156), (140, 109, 49), (189, 158, 57),
+    (231, 186, 82), (231, 203, 148), (132, 60, 57), (173, 73, 74),
+]
 
-def feedback_title_static(target_name: str) -> str:
-    titles = {
-        "overall": "Genel yorum ve puan",
-        "yolo_v1_default": "YOLO v1 sonucu",
-        "yolo_v2_aug_controlled": "YOLO v2 augmentasyonlu sonuc",
-        "yolo_v3_no_erasing": "YOLO v3 no-erasing sonuc",
-        "hybrid_yolo_sam2": "Hibrit YOLO + SAM2 sonucu",
-        "vlm_image_only": "LLM raporu: sadece resim",
-        "vlm_yolo_assisted": "LLM raporu: resim + YOLO tespit ozeti",
-        "vlm_sam2_assisted": "LLM raporu: resim + SAM2 rafine ozeti",
-        "vlm_hybrid_yolo_sam2": "LLM raporu: resim + hibrit YOLO + SAM2 ozeti",
-    }
-    return titles.get(target_name, target_name)
+TITLE_MAP = {
+    "overall": "Genel yorum ve puan",
+    "yolo_v1_default": "YOLO v1 sonucu",
+    "yolo_v2_aug_controlled": "YOLO v2 augmentasyonlu sonuc",
+    "yolo_v3_no_erasing": "YOLO v3 no-erasing sonuc",
+    "hybrid_yolo_sam2": "Hibrit YOLO + SAM2 sonucu",
+    "vlm_image_only": "LLM raporu: sadece resim",
+    "vlm_yolo_assisted": "LLM raporu: resim + YOLO tespit ozeti",
+    "vlm_sam2_assisted": "LLM raporu: resim + SAM2 rafine ozeti",
+    "vlm_hybrid_yolo_sam2": "LLM raporu: resim + hibrit YOLO + SAM2 ozeti",
+}
 
 
-def make_visual_summary(gallery: list[tuple[str, str]], out_path: Path, thumb_size: tuple[int, int] = (360, 240)) -> Path | None:
+def title_for(target: str) -> str:
+    return TITLE_MAP.get(target, target)
+
+
+def class_color(label: str) -> tuple[int, int, int]:
+    stable_index = sum((i + 1) * ord(ch) for i, ch in enumerate(label))
+    return CLASS_COLORS[stable_index % len(CLASS_COLORS)]
+
+
+def read_record(path: Path) -> dict[str, Any] | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data[0] if isinstance(data, list) and data else data
+    except Exception:
+        return None
+
+
+def render_detection_visual(image_path: Path, record_path: Path, out_path: Path, style: str) -> Path | None:
     try:
         from PIL import Image, ImageDraw, ImageFont
     except Exception:
         return None
+    record = read_record(record_path)
+    detections = record.get("detections", []) if isinstance(record, dict) else []
+    if not detections:
+        return None
+    try:
+        image = Image.open(image_path).convert("RGB")
+    except Exception:
+        return None
+    overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    try:
+        font = ImageFont.truetype("Arial.ttf", 14)
+    except Exception:
+        font = ImageFont.load_default()
+    for index, det in enumerate(detections, start=1):
+        label = str(det.get("label", "unknown"))
+        color = class_color(label)
+        polygon = det.get("polygon") or []
+        bbox = det.get("bbox_xyxy") or []
+        if polygon and style in {"mask_only", "small_labels"}:
+            points = [(float(x), float(y)) for x, y in polygon]
+            draw.polygon(points, fill=(*color, 70), outline=(*color, 230))
+        if len(bbox) == 4:
+            x1, y1, x2, y2 = [float(v) for v in bbox]
+            draw.rectangle([x1, y1, x2, y2], outline=(*color, 255), width=3)
+            if style == "small_labels":
+                text = f"{index}. {label} {det.get('confidence', '')}"
+                tw = int(draw.textlength(text, font=font)) + 8
+                y_text = max(0, y1 - 20)
+                draw.rectangle([x1, y_text, x1 + tw, y_text + 20], fill=(*color, 215))
+                draw.text((x1 + 4, y_text + 2), text, fill=(255, 255, 255, 255), font=font)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB").save(out_path, quality=92)
+    return out_path
 
-    items: list[tuple[Image.Image, str]] = []
+
+def render_legend_image(record_path: Path, out_path: Path, title: str) -> Path | None:
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except Exception:
+        return None
+    record = read_record(record_path)
+    detections = record.get("detections", []) if isinstance(record, dict) else []
+    if not detections:
+        return None
+    counts: dict[str, int] = {}
+    for det in detections:
+        label = str(det.get("label", "unknown"))
+        counts[label] = counts.get(label, 0) + 1
+    try:
+        title_font = ImageFont.truetype("Arial.ttf", 22)
+        font = ImageFont.truetype("Arial.ttf", 18)
+    except Exception:
+        title_font = ImageFont.load_default()
+        font = ImageFont.load_default()
+    rows = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    image = Image.new("RGB", (520, max(90, 58 + 30 * len(rows))), "white")
+    draw = ImageDraw.Draw(image)
+    draw.text((18, 16), f"Renk Cetveli: {title}", fill=(20, 20, 20), font=title_font)
+    y = 56
+    for label, count in rows:
+        color = class_color(label)
+        draw.rectangle([20, y + 5, 42, y + 27], fill=color)
+        draw.text((54, y + 3), f"{label}: {count}", fill=(20, 20, 20), font=font)
+        y += 30
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    image.save(out_path, quality=92)
+    return out_path
+
+
+def make_visual_summary(gallery: list[tuple[str, str]], out_path: Path) -> Path | None:
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except Exception:
+        return None
+    items = []
     for image_name, label in gallery:
-        image_path = Path(image_name)
-        if not image_path.exists():
+        path = Path(image_name)
+        if not path.exists():
             continue
         try:
-            image = Image.open(image_path).convert("RGB")
-            image.thumbnail(thumb_size)
+            image = Image.open(path).convert("RGB")
+            image.thumbnail((360, 240))
             items.append((image.copy(), label))
         except Exception:
-            continue
+            pass
     if not items:
         return None
-
     cols = 2 if len(items) <= 4 else 3
-    label_h = 34
-    pad = 18
-    cell_w = thumb_size[0] + pad * 2
-    cell_h = thumb_size[1] + label_h + pad * 2
+    pad, label_h = 18, 34
+    cell_w, cell_h = 396, 310
     rows = (len(items) + cols - 1) // cols
     sheet = Image.new("RGB", (cols * cell_w, rows * cell_h), "white")
     draw = ImageDraw.Draw(sheet)
@@ -80,70 +174,40 @@ def make_visual_summary(gallery: list[tuple[str, str]], out_path: Path, thumb_si
         font = ImageFont.truetype("Arial.ttf", 18)
     except Exception:
         font = ImageFont.load_default()
-
     for index, (image, label) in enumerate(items):
-        col = index % cols
-        row = index // cols
-        x0 = col * cell_w
-        y0 = row * cell_h
+        col, row = index % cols, index // cols
+        x0, y0 = col * cell_w, row * cell_h
         draw.rectangle([x0 + 6, y0 + 6, x0 + cell_w - 6, y0 + cell_h - 6], outline=(210, 210, 210), width=2)
-        text = label[:42]
-        draw.text((x0 + pad, y0 + pad), text, fill=(20, 20, 20), font=font)
-        image_x = x0 + pad + (thumb_size[0] - image.width) // 2
-        image_y = y0 + pad + label_h + (thumb_size[1] - image.height) // 2
-        sheet.paste(image, (image_x, image_y))
-
+        draw.text((x0 + pad, y0 + pad), label[:42], fill=(20, 20, 20), font=font)
+        sheet.paste(image, (x0 + pad + (360 - image.width) // 2, y0 + pad + label_h + (240 - image.height) // 2))
     out_path.parent.mkdir(parents=True, exist_ok=True)
     sheet.save(out_path, quality=92)
     return out_path
 
 
-def write_combined_report(
-    session_dir: Path,
-    session_id: str,
-    visual_summary: Path | None,
-    report_md: str,
-    feedback_lines: list[str] | None = None,
-    target_details: list[dict[str, str]] | None = None,
-    feedback_map: dict[str, dict[str, str | float | None]] | None = None,
-) -> Path:
-    parts = [
-        "# Birlesik Cephe Lejant Raporu",
-        "",
-        f"Session: `{session_id}`",
-        "",
-    ]
+def write_combined_report(session_dir: Path, session_id: str, visual_summary: Path | None, details: list[dict[str, str]], feedback_map: dict[str, dict[str, Any]] | None = None) -> Path:
+    parts = ["# Birlesik Cephe Lejant Raporu", "", f"Session: `{session_id}`", ""]
     if visual_summary:
-        rel_visual = visual_summary.relative_to(session_dir)
-        parts.extend(["## Toplu Gorsel Sonuc", "", f"![Toplu gorsel sonuc]({rel_visual.as_posix()})", "", "----", ""])
-    if target_details:
-        parts.extend(["## Sonuc Detaylari", ""])
-        for detail in target_details:
-            target = detail.get("target", "")
-            title = detail.get("title", target)
-            image = detail.get("image", "")
-            content = detail.get("content", "")
-            parts.extend([f"### {title}", ""])
-            if target:
-                parts.extend([f"Target: `{target}`", ""])
-            if image:
+        parts += ["## Toplu Gorsel Sonuc", "", f"![Toplu gorsel sonuc]({visual_summary.relative_to(session_dir).as_posix()})", "", "----", ""]
+    parts += ["## Sonuc Detaylari", ""]
+    for detail in details:
+        target = detail.get("target", "")
+        title = detail.get("title", target)
+        parts += [f"### {title}", "", f"Target: `{target}`", ""]
+        for key, label in (("image", "Gorsel"), ("legend", "Renk cetveli")):
+            value = detail.get(key, "")
+            if value:
                 try:
-                    rel_image = Path(image).relative_to(session_dir).as_posix()
+                    rel = Path(value).relative_to(session_dir).as_posix()
                 except ValueError:
-                    rel_image = image
-                parts.extend([f"![{title}]({rel_image})", ""])
-            if content:
-                parts.extend([content, ""])
-            feedback = (feedback_map or {}).get(target)
-            if feedback:
-                score = feedback.get("score")
-                comment = feedback.get("comment") or "no feedback"
-                parts.extend(["**Puan ve yorum**", "", f"- Puan: `{score if score is not None else 'no feedback'}`", f"- Yorum: {comment}", ""])
-            parts.extend(["----", ""])
-    else:
-        parts.extend(["## Cephe Raporlari", "", report_md, ""])
-    if feedback_lines and not target_details:
-        parts.extend(["----", "", "## Puan ve Yorum Ozeti", "", *feedback_lines, ""])
+                    rel = value
+                parts += [f"**{label}**", "", f"![{title} {label}]({rel})", ""]
+        if detail.get("content"):
+            parts += [detail["content"], ""]
+        feedback = (feedback_map or {}).get(target)
+        if feedback:
+            parts += ["**Puan ve yorum**", "", f"- Puan: `{feedback.get('score') if feedback.get('score') is not None else 'no feedback'}`", f"- Yorum: {feedback.get('comment') or 'no feedback'}", ""]
+        parts += ["----", ""]
     out_path = session_dir / "combined_report.md"
     out_path.write_text("\n".join(parts), encoding="utf-8")
     return out_path
@@ -155,7 +219,6 @@ def get_openai_api_key() -> tuple[str, str]:
         return env_key, "OPENAI_API_KEY ortam degiskeninden alindi."
     try:
         from google.colab import userdata  # type: ignore
-
         secret_key = (userdata.get("OPENAI_API_KEY") or "").strip()
         if secret_key:
             os.environ["OPENAI_API_KEY"] = secret_key
@@ -166,553 +229,271 @@ def get_openai_api_key() -> tuple[str, str]:
 
 
 def live_run_command(command: list[str], cwd: Path, log_callback: Any | None = None) -> str:
-    command_text = " ".join(command)
     if log_callback:
-        log_callback(f"$ {command_text}")
-    process = subprocess.Popen(
-        command,
-        cwd=cwd,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        bufsize=1,
-    )
-    lines: list[str] = []
+        log_callback("$ " + " ".join(command))
+    process = subprocess.Popen(command, cwd=cwd, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1)
+    lines = []
     assert process.stdout is not None
     for line in process.stdout:
         clean = line.rstrip()
         lines.append(clean)
         if log_callback and clean:
             log_callback(clean)
-    return_code = process.wait()
-    output = "\n".join(lines)
-    if return_code != 0:
-        raise RuntimeError(f"Command failed: {command_text}\n{output}")
-    return output
+    if process.wait() != 0:
+        raise RuntimeError("Command failed: " + " ".join(command) + "\n" + "\n".join(lines))
+    return "\n".join(lines)
 
 
 class LiveEvaluationRunner(EvaluationRunner):
-    def run_yolo_live(
-        self,
-        session_id: str,
-        session_dir: Path,
-        image_path: Path,
-        alias: str,
-        conf: float,
-        log_callback: Any | None = None,
-    ) -> dict[str, Any]:
+    def run_yolo_live(self, session_id: str, session_dir: Path, image_path: Path, alias: str, conf: float, visual_style: str, log_callback: Any | None = None) -> dict[str, Any]:
         weight = find_weight(self.weights_dir, alias)
         model_dir = session_dir / alias
         model_dir.mkdir(parents=True, exist_ok=True)
         if weight is None:
-            return {"name": alias, "status": "missing weight", "visual": None, "json": None}
+            return {"name": alias, "status": "missing weight", "visual": None, "legend": None, "json": None}
         out_json = model_dir / "detections.json"
-        run_name = alias
         project = model_dir / "runs"
-        command = [
-            sys.executable,
-            "scripts/infer_yolo.py",
-            "--weights",
-            str(weight),
-            "--source",
-            str(image_path),
-            "--task",
-            "segment",
-            "--conf",
-            str(conf),
-            "--out",
-            str(out_json),
-            "--name",
-            run_name,
-            "--project",
-            str(project),
-            "--save-visuals",
-        ]
+        command = [sys.executable, "scripts/infer_yolo.py", "--weights", str(weight), "--source", str(image_path), "--task", "segment", "--conf", str(conf), "--out", str(out_json), "--name", alias, "--project", str(project)]
+        if visual_style == "original_labels":
+            command.append("--save-visuals")
         if self.yolo_device:
-            command.extend(["--device", self.yolo_device])
-        live_run_command(command, self.project_dir, log_callback=log_callback)
-        visual = first_visual(project / run_name)
-        if visual:
+            command += ["--device", self.yolo_device]
+        live_run_command(command, self.project_dir, log_callback)
+        visual = first_visual(project / alias)
+        if visual_style != "original_labels":
+            visual = render_detection_visual(image_path, out_json, model_dir / f"{alias}_{visual_style}.jpg", visual_style) or visual
+        elif visual:
             shutil.copy2(visual, model_dir / visual.name)
             visual = model_dir / visual.name
-        metadata = {"weight": str(weight), "conf": conf}
-        insert_artifact(self.db_path, session_id, "json", f"{alias}_json", out_json, metadata)
+        legend = render_legend_image(out_json, model_dir / f"{alias}_renk_cetveli.jpg", alias)
+        insert_artifact(self.db_path, session_id, "json", f"{alias}_json", out_json, {"weight": str(weight), "conf": conf})
         if visual:
-            insert_artifact(self.db_path, session_id, "image", f"{alias}_visual", visual, metadata)
-        return {"name": alias, "status": "ok", "visual": visual, "json": out_json}
+            insert_artifact(self.db_path, session_id, "image", f"{alias}_visual", visual)
+        if legend:
+            insert_artifact(self.db_path, session_id, "image", f"{alias}_legend", legend)
+        return {"name": alias, "status": "ok", "visual": visual, "legend": legend, "json": out_json}
 
-    def run_hybrid_live(
-        self,
-        session_id: str,
-        session_dir: Path,
-        image_path: Path,
-        log_callback: Any | None = None,
-    ) -> dict[str, Any]:
+    def run_hybrid_live(self, session_id: str, session_dir: Path, image_path: Path, visual_style: str, log_callback: Any | None = None) -> dict[str, Any]:
         hybrid_dir = session_dir / "hybrid_yolo_sam2"
         hybrid_dir.mkdir(parents=True, exist_ok=True)
-        raw = self.run_yolo_live(session_id, session_dir, image_path, "yolo_v3_no_erasing", conf=0.25, log_callback=log_callback)
+        raw = self.run_yolo_live(session_id, session_dir, image_path, "yolo_v3_no_erasing", 0.25, visual_style, log_callback)
         raw_json = raw.get("json")
         if not raw_json:
-            return {"name": "hybrid_yolo_sam2", "status": "missing yolo_v3", "visual": None, "json": None}
+            return {"name": "hybrid_yolo_sam2", "status": "missing yolo_v3", "visual": None, "legend": None, "json": None}
         filtered_json = hybrid_dir / "yolo_filtered_conf078.json"
-        live_run_command(
-            [
-                sys.executable,
-                "scripts/filter_detections.py",
-                "--input",
-                str(raw_json),
-                "--out",
-                str(filtered_json),
-                "--default-conf",
-                "0.78",
-                "--class-threshold",
-                "cam=0.82",
-                "--class-threshold",
-                "ahsap_dograma=0.78",
-                "--class-threshold",
-                "camur_harc=0.72",
-                "--min-area-ratio",
-                "0.00005",
-                "--max-area-ratio",
-                "0.35",
-                "--nms-iou",
-                "0.25",
-            ],
-            self.project_dir,
-            log_callback=log_callback,
-        )
-        insert_artifact(self.db_path, session_id, "json", "hybrid_filtered_json", filtered_json)
+        live_run_command([sys.executable, "scripts/filter_detections.py", "--input", str(raw_json), "--out", str(filtered_json), "--default-conf", "0.78", "--class-threshold", "cam=0.82", "--class-threshold", "ahsap_dograma=0.78", "--class-threshold", "camur_harc=0.72", "--min-area-ratio", "0.00005", "--max-area-ratio", "0.35", "--nms-iou", "0.25"], self.project_dir, log_callback)
+        legend = render_legend_image(filtered_json, hybrid_dir / "hybrid_yolo_sam2_renk_cetveli.jpg", "hybrid_yolo_sam2")
         if not self.sam2_dir or not self.sam2_dir.exists() or not self.sam2_checkpoint or not self.sam2_checkpoint.exists():
-            return {"name": "hybrid_yolo_sam2", "status": "filtered only; SAM2 not installed", "visual": raw.get("visual"), "json": filtered_json}
+            return {"name": "hybrid_yolo_sam2", "status": "filtered only; SAM2 not installed", "visual": raw.get("visual"), "legend": legend, "json": filtered_json, "raw_json": raw_json}
         hybrid_json = hybrid_dir / "hybrid_yolo_sam2.json"
         visual_dir = hybrid_dir / "visuals"
-        live_run_command(
-            [
-                sys.executable,
-                str(self.project_dir / "scripts/refine_with_sam2.py"),
-                "--detections",
-                str(filtered_json),
-                "--checkpoint",
-                str(self.sam2_checkpoint),
-                "--model-cfg",
-                self.sam2_model_cfg,
-                "--out",
-                str(hybrid_json),
-                "--visual-dir",
-                str(visual_dir),
-                "--device",
-                self.sam2_device or "cuda",
-            ],
-            self.sam2_dir,
-            log_callback=log_callback,
-        )
+        live_run_command([sys.executable, str(self.project_dir / "scripts/refine_with_sam2.py"), "--detections", str(filtered_json), "--checkpoint", str(self.sam2_checkpoint), "--model-cfg", self.sam2_model_cfg, "--out", str(hybrid_json), "--visual-dir", str(visual_dir), "--device", self.sam2_device or "cuda"], self.sam2_dir, log_callback)
         visual = first_visual(visual_dir)
-        insert_artifact(self.db_path, session_id, "json", "hybrid_yolo_sam2_json", hybrid_json)
-        if visual:
-            insert_artifact(self.db_path, session_id, "image", "hybrid_yolo_sam2_visual", visual)
-        return {"name": "hybrid_yolo_sam2", "status": "ok", "visual": visual, "json": hybrid_json, "raw_json": raw_json}
+        legend = render_legend_image(hybrid_json, hybrid_dir / "hybrid_yolo_sam2_renk_cetveli.jpg", "hybrid_yolo_sam2") or legend
+        return {"name": "hybrid_yolo_sam2", "status": "ok", "visual": visual, "legend": legend, "json": hybrid_json, "raw_json": raw_json}
 
-    def run_session(
-        self,
-        image_file: str,
-        api_key: str,
-        vlm_model: str,
-        run_v1: bool,
-        run_v2: bool,
-        run_v3: bool,
-        run_hybrid: bool,
-        vlm_image_only: bool,
-        vlm_yolo: bool,
-        vlm_sam: bool,
-        vlm_hybrid: bool,
-        log_callback: Any | None = None,
-    ) -> tuple[str, list[tuple[str, str]], str, str, list[str], list[dict[str, str]], str]:
-        debug_log: list[str] = []
-
+    def run_session(self, image_file: str, api_key: str, vlm_model: str, run_v1: bool, run_v2: bool, run_v3: bool, run_hybrid: bool, vlm_image_only: bool, vlm_yolo: bool, vlm_sam: bool, vlm_hybrid: bool, visual_style: str, log_callback: Any | None = None):
+        debug: list[str] = []
         def emit(message: str) -> None:
-            debug_log.append(message)
+            debug.append(message)
             if log_callback:
                 log_callback(message)
-
         session_id = f"session_{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
         session_dir = self.reports_dir / "evaluation_sessions" / session_id
-        emit(f"Session: {session_id}")
-        emit(f"Session dir: {session_dir}")
         image_path = normalize_input_image(image_file, session_dir / "input")
-        emit(f"Input image: {image_path}")
         insert_session(self.db_path, session_id, image_path, session_dir)
         insert_artifact(self.db_path, session_id, "image", "input", image_path)
-
-        results: list[dict[str, Any]] = []
+        emit(f"Session: {session_id}")
+        results = []
         if run_v1:
-            emit("YOLO v1 basliyor...")
-            result = self.run_yolo_live(session_id, session_dir, image_path, "yolo_v1_default", conf=0.25, log_callback=emit)
-            results.append(result)
-            emit(f"YOLO v1: {result['status']} json={result.get('json')} visual={result.get('visual')}")
+            results.append(self.run_yolo_live(session_id, session_dir, image_path, "yolo_v1_default", 0.25, visual_style, emit))
         if run_v2:
-            emit("YOLO v2 basliyor...")
-            result = self.run_yolo_live(session_id, session_dir, image_path, "yolo_v2_aug_controlled", conf=0.25, log_callback=emit)
-            results.append(result)
-            emit(f"YOLO v2: {result['status']} json={result.get('json')} visual={result.get('visual')}")
+            results.append(self.run_yolo_live(session_id, session_dir, image_path, "yolo_v2_aug_controlled", 0.25, visual_style, emit))
         if run_v3:
-            emit("YOLO v3 basliyor...")
-            result = self.run_yolo_live(session_id, session_dir, image_path, "yolo_v3_no_erasing", conf=0.25, log_callback=emit)
-            results.append(result)
-            emit(f"YOLO v3: {result['status']} json={result.get('json')} visual={result.get('visual')}")
-
+            results.append(self.run_yolo_live(session_id, session_dir, image_path, "yolo_v3_no_erasing", 0.25, visual_style, emit))
         hybrid_result = None
         if run_hybrid or vlm_sam or vlm_hybrid:
-            emit("Hybrid YOLO+SAM2 basliyor...")
-            hybrid_result = self.run_hybrid_live(session_id, session_dir, image_path, log_callback=emit)
-            emit(f"Hybrid YOLO+SAM2: {hybrid_result['status']} json={hybrid_result.get('json')} visual={hybrid_result.get('visual')}")
+            hybrid_result = self.run_hybrid_live(session_id, session_dir, image_path, visual_style, emit)
             if run_hybrid:
                 results.append(hybrid_result)
-
-        reports_md = [
-            "# Cephe Lejant Raporu",
-            "",
-            f"Session: `{session_id}`",
-            "",
-            "## Kullanilan Yontemler",
-            "- YOLO segmentasyon modelleri ile cephe elemanlari tespit edildi.",
-            "- SAM2, YOLO tespitlerinden gelen maskeleri gorsel olarak rafine etmek icin kullanildi.",
-            "- LLM/VLM, model ciktilarini mimari cephe lejant raporuna donusturmek icin kullanildi.",
-            "- Sayisal adetlerde model JSON ciktilari esas alindi; LLM'den yeni sayi uydurmasi istenmedi.",
-            "",
-            "----",
-            "",
-        ]
-        gallery: list[tuple[str, str]] = [(str(image_path), "input")]
-        target_names: list[str] = []
-        target_details: list[dict[str, str]] = []
+        report_parts = ["# Cephe Lejant Raporu", "", f"Session: `{session_id}`", "", "## Kullanilan Yontemler", "- YOLO/SAM2 ile tespit ve maske ciktisi uretildi.", "- LLM raporlari bina/cephe yorumu icin kullanildi.", "", "----", ""]
+        gallery = [(str(image_path), "input")]
+        targets, details = [], []
         for result in results:
-            section = [f"## Tespit Ozeti: {result['name']}", f"Durum: {result['status']}"]
+            name = result["name"]
+            section = [f"## Tespit Ozeti: {name}", f"Durum: {result['status']}"]
             if result.get("json"):
-                counts = detection_counts(one_record(result["json"]))
-                section.append(f"Tespit ozeti: `{json.dumps(counts, ensure_ascii=False)}`")
-            reports_md.extend(section)
-            reports_md.extend(["", "----", ""])
-            visual_path = str(result["visual"]) if result.get("visual") else ""
-            if result.get("visual"):
-                gallery.append((str(result["visual"]), result["name"]))
-            target_names.append(result["name"])
-            target_details.append(
-                {
-                    "target": result["name"],
-                    "title": feedback_title_static(result["name"]),
-                    "image": visual_path,
-                    "content": "\n".join(section),
-                }
-            )
-
+                section.append(f"Tespit ozeti: `{json.dumps(detection_counts(one_record(result['json'])), ensure_ascii=False)}`")
+            report_parts += section + ["", "----", ""]
+            for key, suffix in (("visual", ""), ("legend", "_renk_cetveli")):
+                if result.get(key):
+                    gallery.append((str(result[key]), name + suffix))
+            targets.append(name)
+            details.append({"target": name, "title": title_for(name), "image": str(result.get("visual") or ""), "legend": str(result.get("legend") or ""), "content": "\n".join(section)})
         if any([vlm_image_only, vlm_yolo, vlm_sam, vlm_hybrid]):
-            emit("VLM raporlama basliyor...")
-            assisted_payload = make_report_payload(
-                raw_json=hybrid_result.get("raw_json") if hybrid_result else None,
-                filtered_json=(session_dir / "hybrid_yolo_sam2" / "yolo_filtered_conf078.json"),
-                hybrid_json=hybrid_result.get("json") if hybrid_result else None,
-            )
-            yolo_payload = make_yolo_payload(results)
             vlm_dir = session_dir / "vlm_reports"
             vlm_dir.mkdir(parents=True, exist_ok=True)
+            assisted_payload = make_report_payload(raw_json=hybrid_result.get("raw_json") if hybrid_result else None, filtered_json=(session_dir / "hybrid_yolo_sam2" / "yolo_filtered_conf078.json"), hybrid_json=hybrid_result.get("json") if hybrid_result else None)
+            yolo_payload = make_yolo_payload(results)
+            vlm_jobs = []
             if vlm_image_only:
-                emit("VLM image-only raporu uretiliyor...")
-                image_only = call_vlm(
-                    image_path,
-                    "Bu gorsel icin bina/cephe odakli mimari cephe lejant raporu yaz. Model veya algoritma anlatma. Cephede gorulen elemanlari, malzemeleri, cephe duzenini, olasi koruma/restorasyon acisindan dikkat ceken noktalari yorumla. Sayilar tahminse acikca tahmini oldugunu belirt.",
-                    api_key=api_key,
-                    model=vlm_model,
-                )
-                save_vlm_report(self.db_path, session_id, vlm_dir, "vlm_image_only", image_only)
-                reports_md.extend(["## Sadece Resim ile LLM Cephe Raporu", image_only, "", "----", ""])
-                target_names.append("vlm_image_only")
-                target_details.append({"target": "vlm_image_only", "title": feedback_title_static("vlm_image_only"), "image": str(image_path), "content": image_only})
+                vlm_jobs.append(("vlm_image_only", "Sadece Resim ile LLM Cephe Raporu", "Bu gorsel icin bina/cephe odakli mimari cephe lejant raporu yaz. Model veya algoritma anlatma. Cephede gorulen elemanlari, malzemeleri, cephe duzenini ve koruma/restorasyon acisindan dikkat ceken noktalari yorumla."))
             if vlm_yolo:
-                emit("VLM YOLO destekli rapor uretiliyor...")
-                yolo_report = call_vlm(
-                    image_path,
-                    "Bu gorsel ve asagidaki tespit ozeti ile bina/cephe odakli mimari cephe lejant raporu yaz. Algoritma karsilastirmasi yapma; yalnizca raporun basinda 'YOLO tespit ozeti kullanildi' diye kisa belirt. Sayi olarak sadece total_detections ve class_counts alanlarini kullan. Cephe elemanlarini, malzeme izlenimlerini, cephe duzenini ve koruma/restorasyon acisindan yorumlari acikla.\n\n"
-                    + json.dumps(yolo_payload, ensure_ascii=False, indent=2),
-                    api_key=api_key,
-                    model=vlm_model,
-                )
-                save_vlm_report(self.db_path, session_id, vlm_dir, "vlm_yolo_assisted", yolo_report, yolo_payload)
-                reports_md.extend(["## YOLO Tespit Ozeti ile LLM Cephe Raporu", yolo_report, "", "----", ""])
-                target_names.append("vlm_yolo_assisted")
-                target_details.append({"target": "vlm_yolo_assisted", "title": feedback_title_static("vlm_yolo_assisted"), "image": str(image_path), "content": yolo_report})
+                vlm_jobs.append(("vlm_yolo_assisted", "YOLO Tespit Ozeti ile LLM Cephe Raporu", "Bu gorsel ve YOLO tespit ozeti ile bina/cephe odakli mimari cephe lejant raporu yaz. Algoritma karsilastirmasi yapma.\n\n" + json.dumps(yolo_payload, ensure_ascii=False, indent=2)))
             if vlm_sam:
-                emit("VLM SAM2 destekli rapor uretiliyor...")
-                sam_payload = {"instruction": "Use hybrid_yolo_sam2 counts as the SAM2-refined mask result. SAM2 is prompted by YOLO boxes.", "sam2_refined": assisted_payload["hybrid_yolo_sam2"]}
-                sam_report = call_vlm(
-                    image_path,
-                    "Bu gorsel ve asagidaki rafine tespit ozeti ile bina/cephe odakli mimari cephe lejant raporu yaz. Algoritma detaylarina girme; yalnizca raporun basinda 'SAM2 ile rafine edilmis tespit ozeti kullanildi' diye kisa belirt. Sayi olarak sadece total_detections ve class_counts alanlarini kullan. Cephedeki elemanlari, malzemeleri ve cephe karakterini yorumla.\n\n"
-                    + json.dumps(sam_payload, ensure_ascii=False, indent=2),
-                    api_key=api_key,
-                    model=vlm_model,
-                )
-                save_vlm_report(self.db_path, session_id, vlm_dir, "vlm_sam2_assisted", sam_report, sam_payload)
-                reports_md.extend(["## SAM2 Rafine Cikti ile LLM Cephe Raporu", sam_report, "", "----", ""])
-                target_names.append("vlm_sam2_assisted")
-                target_details.append({"target": "vlm_sam2_assisted", "title": feedback_title_static("vlm_sam2_assisted"), "image": str(image_path), "content": sam_report})
+                vlm_jobs.append(("vlm_sam2_assisted", "SAM2 Rafine Cikti ile LLM Cephe Raporu", "Bu gorsel ve SAM2 ile rafine edilmis tespit ozeti ile bina/cephe odakli mimari cephe lejant raporu yaz.\n\n" + json.dumps({"sam2_refined": assisted_payload.get("hybrid_yolo_sam2")}, ensure_ascii=False, indent=2)))
             if vlm_hybrid:
-                emit("VLM hybrid raporu uretiliyor...")
-                hybrid_report = call_vlm(
-                    image_path,
-                    "Bu gorsel ve asagidaki hibrit tespit ozeti ile bina/cephe odakli mimari cephe lejant raporu yaz. Algoritma ayrintilarina girme; yalnizca raporun basinda 'hibrit YOLO+SAM2 tespit ozeti kullanildi' diye kisa belirt. Sayi olarak sadece total_detections ve class_counts alanlarini kullan. Cephe elemanlari, malzeme karakteri, mimari duzen ve olasi koruma/restorasyon degerlendirmesini anlat.\n\n"
-                    + json.dumps(assisted_payload, ensure_ascii=False, indent=2),
-                    api_key=api_key,
-                    model=vlm_model,
-                )
-                save_vlm_report(self.db_path, session_id, vlm_dir, "vlm_hybrid_yolo_sam2", hybrid_report, assisted_payload)
-                reports_md.extend(["## Hibrit YOLO + SAM2 Cikti ile LLM Cephe Raporu", hybrid_report, "", "----", ""])
-                target_names.append("vlm_hybrid_yolo_sam2")
-                target_details.append({"target": "vlm_hybrid_yolo_sam2", "title": feedback_title_static("vlm_hybrid_yolo_sam2"), "image": str(image_path), "content": hybrid_report})
-
+                vlm_jobs.append(("vlm_hybrid_yolo_sam2", "Hibrit YOLO + SAM2 Cikti ile LLM Cephe Raporu", "Bu gorsel ve hibrit YOLO+SAM2 tespit ozeti ile bina/cephe odakli mimari cephe lejant raporu yaz.\n\n" + json.dumps(assisted_payload, ensure_ascii=False, indent=2)))
+            for target, heading, prompt in vlm_jobs:
+                emit(f"{target} uretiliyor...")
+                text = call_vlm(image_path, prompt, api_key=api_key, model=vlm_model)
+                save_vlm_report(self.db_path, session_id, vlm_dir, target, text)
+                report_parts += [f"## {heading}", text, "", "----", ""]
+                targets.append(target)
+                details.append({"target": target, "title": title_for(target), "image": str(image_path), "legend": "", "content": text})
         visual_summary = make_visual_summary(gallery, session_dir / "visual_summary.jpg")
         if visual_summary:
             gallery.insert(0, (str(visual_summary), "toplu_gorsel_sonuc"))
-            insert_artifact(self.db_path, session_id, "image", "visual_summary", visual_summary)
-
-        target_names.append("overall")
-        target_details.append(
-            {
-                "target": "overall",
-                "title": feedback_title_static("overall"),
-                "image": str(visual_summary) if visual_summary else str(image_path),
-                "content": "Genel degerlendirme ve kullanici yorumu icin ayrilan bolum.",
-            }
-        )
+        targets.append("overall")
+        details.append({"target": "overall", "title": title_for("overall"), "image": str(visual_summary or image_path), "legend": "", "content": "Genel degerlendirme ve kullanici yorumu icin ayrilan bolum."})
         summary_path = session_dir / "session_summary.md"
-        summary_path.write_text("\n".join(reports_md), encoding="utf-8")
+        summary_path.write_text("\n".join(report_parts), encoding="utf-8")
+        combined = write_combined_report(session_dir, session_id, visual_summary, details)
         insert_artifact(self.db_path, session_id, "report", "session_summary", summary_path)
-        combined_path = write_combined_report(session_dir, session_id, visual_summary, "\n".join(reports_md), target_details=target_details)
-        insert_artifact(self.db_path, session_id, "report", "combined_report", combined_path)
-        emit(f"Summary: {summary_path}")
-        emit(f"Combined report: {combined_path}")
-        emit(f"SQLite DB: {self.db_path}")
-        return session_id, gallery, "\n".join(reports_md), str(self.db_path), target_names, target_details, "\n".join(debug_log)
+        insert_artifact(self.db_path, session_id, "report", "combined_report", combined)
+        return session_id, gallery, "\n".join(report_parts), str(self.db_path), targets, details, "\n".join(debug)
 
 
 def build_app(runner: EvaluationRunner):
     import gradio as gr
-
     auto_api_key, api_key_status = get_openai_api_key()
     feedback_slots = 9
+    star_choices = [("No feedback", 0), ("★", 1), ("★★", 2), ("★★★", 3), ("★★★★", 4), ("★★★★★", 5)]
 
-    def feedback_title(target_name: str) -> str:
-        return feedback_title_static(target_name)
-
-    def tab_updates(details: list[dict[str, str]] | None):
+    def tab_updates(details):
         ordered = list(details or [])
         updates = []
-        for index in range(feedback_slots):
-            if index < len(ordered):
-                detail = ordered[index]
-                target = detail.get("target", "")
-                title = detail.get("title") or feedback_title(target)
-                image_path = detail.get("image") or None
-                content = detail.get("content") or ""
-                updates.extend(
-                    [
-                        gr.update(label=title[:28], visible=True),
-                        gr.update(value=f"### {title}\n`{target}`", visible=True),
-                        gr.update(value=image_path, visible=bool(image_path)),
-                        gr.update(value=content, visible=True),
-                        gr.update(value=0, visible=True),
-                        gr.update(value="", visible=True),
-                    ]
-                )
+        for i in range(feedback_slots):
+            if i < len(ordered):
+                d = ordered[i]
+                updates += [gr.update(label=d.get("title", "Sonuc")[:28], visible=True), gr.update(value=f"### {d.get('title')}\n`{d.get('target')}`", visible=True), gr.update(value=d.get("image") or None, visible=bool(d.get("image"))), gr.update(value=d.get("content", ""), visible=True), gr.update(value=0, visible=True), gr.update(value="", visible=True)]
             else:
-                updates.extend(
-                    [
-                        gr.update(visible=False),
-                        gr.update(value="", visible=False),
-                        gr.update(value=None, visible=False),
-                        gr.update(value="", visible=False),
-                        gr.update(value=0, visible=False),
-                        gr.update(value="", visible=False),
-                    ]
-                )
+                updates += [gr.update(visible=False), gr.update(value="", visible=False), gr.update(value=None, visible=False), gr.update(value="", visible=False), gr.update(value=0, visible=False), gr.update(value="", visible=False)]
         return updates
 
-    def run_clicked(
-        image_file,
-        manual_api_key,
-        vlm_model,
-        run_v1,
-        run_v2,
-        run_v3,
-        run_hybrid,
-        vlm_image_only,
-        vlm_yolo,
-        vlm_sam,
-        vlm_hybrid,
-    ):
+    def llm_card_updates(details):
+        llm = [d for d in list(details or []) if d.get("target", "").startswith("vlm_")]
+        updates = []
+        for i in range(4):
+            if i < len(llm):
+                d = llm[i]
+                updates += [gr.update(visible=True), gr.update(value=f"### {d.get('title')}\n`{d.get('target')}`\n\n{d.get('content', '')}", visible=True), gr.update(value=0, visible=True), gr.update(value="", visible=True)]
+            else:
+                updates += [gr.update(visible=False), gr.update(value="", visible=False), gr.update(value=0, visible=False), gr.update(value="", visible=False)]
+        return updates
+
+    def compare_choice_update(details):
+        choices = [(d.get("title", d.get("target", "")), d.get("target", "")) for d in list(details or [])]
+        defaults = [v for _, v in choices if v.startswith("vlm_")][:4] or [v for _, v in choices[:4]]
+        return gr.update(choices=choices, value=defaults, visible=bool(choices))
+
+    def compare_slot_updates(details):
+        choices = [(d.get("title", d.get("target", "")), d.get("target", "")) for d in list(details or [])]
+        defaults = [v for _, v in choices if v.startswith("vlm_")][:4] or [v for _, v in choices[:4]]
+        return [gr.update(choices=choices, value=defaults[i] if i < len(defaults) else None, visible=bool(choices)) for i in range(4)]
+
+    def compare_selected(selected_targets, details, s1, s2, s3, s4):
+        selected = [s for s in [s1, s2, s3, s4] if s] or list(selected_targets or [])[:4]
+        by_target = {d.get("target", ""): d for d in list(details or [])}
+        updates = []
+        for i in range(4):
+            if i < len(selected):
+                d = by_target.get(selected[i], {})
+                updates += [gr.update(visible=True), gr.update(value=f"### {d.get('title', selected[i])}\n`{selected[i]}`"), gr.update(value=d.get("image") or None, visible=bool(d.get("image"))), gr.update(value=d.get("content", ""))]
+            else:
+                updates += [gr.update(visible=False), gr.update(value=""), gr.update(value=None, visible=False), gr.update(value="")]
+        return updates
+
+    def run_clicked(image_file, manual_api_key, vlm_model, run_v1, run_v2, run_v3, run_hybrid, vlm_image_only, vlm_yolo, vlm_sam, vlm_hybrid, visual_style):
         if image_file is None:
             raise gr.Error("Once bir gorsel yukle.")
         log_queue: queue.Queue[str] = queue.Queue()
         result_box: dict[str, object] = {}
-
-        def emit(message: str) -> None:
-            log_queue.put(message)
-
-        def worker() -> None:
+        def worker():
             try:
-                result_box["value"] = runner.run_session(
-                    image_file=image_file,
-                    api_key=(manual_api_key or "").strip() or auto_api_key,
-                    vlm_model=vlm_model or "gpt-4o",
-                    run_v1=run_v1,
-                    run_v2=run_v2,
-                    run_v3=run_v3,
-                    run_hybrid=run_hybrid,
-                    vlm_image_only=vlm_image_only,
-                    vlm_yolo=vlm_yolo,
-                    vlm_sam=vlm_sam,
-                    vlm_hybrid=vlm_hybrid,
-                    log_callback=emit,
-                )
+                result_box["value"] = runner.run_session(image_file, (manual_api_key or "").strip() or auto_api_key, vlm_model or "gpt-4o", run_v1, run_v2, run_v3, run_hybrid, vlm_image_only, vlm_yolo, vlm_sam, vlm_hybrid, visual_style or "mask_only", log_queue.put)
             except Exception as exc:
                 result_box["error"] = f"{exc}\n\n{traceback.format_exc()}"
-
         thread = threading.Thread(target=worker, daemon=True)
         thread.start()
-        logs = ["Calisma basladi. Terminal akisindan sureci izleyebilirsin."]
-        yield (
-            "",
-            [],
-            "## Calisiyor\n\nModel ve rapor uretimi devam ediyor.",
-            str(runner.db_path),
-            "\n".join(logs),
-            [],
-            [],
-            *tab_updates([]),
-        )
-
+        logs = ["Calisma basladi."]
+        empty = ["", [], "## Calisiyor", str(runner.db_path), "\n".join(logs), [], []]
+        yield (*empty, *tab_updates([]), *llm_card_updates([]), compare_choice_update([]), *compare_slot_updates([]))
         while thread.is_alive():
-            while True:
-                try:
-                    logs.append(log_queue.get_nowait())
-                except queue.Empty:
-                    break
-            yield (
-                "",
-                [],
-                "## Calisiyor\n\nModel ve rapor uretimi devam ediyor.",
-                str(runner.db_path),
-                "\n".join(logs[-250:]),
-                [],
-                [],
-                *tab_updates([]),
-            )
-            time.sleep(0.5)
-
-        while True:
-            try:
+            while not log_queue.empty():
                 logs.append(log_queue.get_nowait())
-            except queue.Empty:
-                break
-
+            yield (*empty[:4], "\n".join(logs[-250:]), [], [], *tab_updates([]), *llm_card_updates([]), compare_choice_update([]), *compare_slot_updates([]))
+            time.sleep(0.5)
+        while not log_queue.empty():
+            logs.append(log_queue.get_nowait())
         if "error" in result_box:
-            error_text = f"## Hata\n\n```text\n{result_box['error']}\n```"
-            logs.append("Hata olustu. Ayrinti yukaridaki traceback icinde.")
-            yield (
-                "",
-                [],
-                error_text,
-                str(runner.db_path),
-                "\n".join(logs[-300:]),
-                [],
-                [],
-                *tab_updates([]),
-            )
+            err = f"## Hata\n\n```text\n{result_box['error']}\n```"
+            yield ("", [], err, str(runner.db_path), "\n".join(logs[-300:]), [], [], *tab_updates([]), *llm_card_updates([]), compare_choice_update([]), *compare_slot_updates([]))
             return
+        session_id, gallery, report, db_path, targets, details, debug = result_box["value"]  # type: ignore[misc]
+        yield (session_id, gallery, report, db_path, "\n".join((logs + str(debug).splitlines())[-300:]), targets, details, *tab_updates(details), *llm_card_updates(details), compare_choice_update(details), *compare_slot_updates(details))
 
-        session_id, gallery, report, db_path, targets, target_details, debug_log = result_box["value"]  # type: ignore[misc]
-        logs.append("Calisma tamamlandi.")
-        if debug_log:
-            logs.extend(str(debug_log).splitlines())
-        yield (
-            session_id,
-            gallery,
-            report,
-            db_path,
-            "\n".join(logs[-300:]),
-            targets,
-            target_details,
-            *tab_updates(target_details),
-        )
-
-    def save_all_feedback_clicked(session_id, targets, target_details, *values):
+    def save_feedback(session_id, targets, details, *values):
         if not session_id:
             raise gr.Error("Once bir test oturumu calistir.")
-        saved = []
-        feedback_lines = []
+        feedback_map: dict[str, dict[str, Any]] = {}
+        lines = []
         target_list = list(targets or [])
-        details = list(target_details or [])
-        feedback_map: dict[str, dict[str, str | float | None]] = {}
-        for index, target_name in enumerate(target_list[:feedback_slots]):
-            score = values[index * 2]
-            comment = (values[index * 2 + 1] or "").strip()
-            numeric_score = float(score) if score and float(score) > 0 else None
-            stored_comment = comment or ("no feedback" if numeric_score is None else "no comment")
-            insert_rating(runner.db_path, session_id, target_name, numeric_score, stored_comment)
-            feedback_map[target_name] = {"score": numeric_score, "comment": stored_comment}
-            saved.append(f"{target_name}: {numeric_score if numeric_score is not None else 'no feedback'}")
-            feedback_lines.append(f"- **{feedback_title(target_name)}** (`{target_name}`): puan = `{numeric_score if numeric_score is not None else 'no feedback'}`; yorum = {stored_comment}")
-        if not saved:
-            return "Kaydedilecek hedef bulunamadi. Once bir analiz calistir."
+        for i, target in enumerate(target_list[:feedback_slots]):
+            score = values[i * 2]
+            comment = (values[i * 2 + 1] or "").strip()
+            numeric = float(score) if score and float(score) > 0 else None
+            stored = comment or ("no feedback" if numeric is None else "no comment")
+            insert_rating(runner.db_path, session_id, target, numeric, stored)
+            feedback_map[target] = {"score": numeric, "comment": stored}
+            lines.append(f"- **{title_for(target)}** (`{target}`): puan=`{numeric if numeric is not None else 'no feedback'}`; yorum={stored}")
+        llm_targets = [d.get("target", "") for d in list(details or []) if d.get("target", "").startswith("vlm_")][:4]
+        offset = feedback_slots * 2
+        for i, target in enumerate(llm_targets):
+            score = values[offset + i * 2]
+            comment = (values[offset + i * 2 + 1] or "").strip()
+            if not (score and float(score) > 0) and not comment:
+                continue
+            numeric = float(score) if score and float(score) > 0 else None
+            stored = comment or ("no feedback" if numeric is None else "no comment")
+            insert_rating(runner.db_path, session_id, target, numeric, stored)
+            feedback_map[target] = {"score": numeric, "comment": stored}
         session_dir = runner.reports_dir / "evaluation_sessions" / session_id
-        feedback_path = session_dir / "feedback_summary.md"
-        feedback_path.write_text("# Puan ve Yorum Ozeti\n\n" + "\n".join(feedback_lines) + "\n", encoding="utf-8")
-        summary_path = session_dir / "session_summary.md"
-        report_md = summary_path.read_text(encoding="utf-8") if summary_path.exists() else ""
-        visual_summary = session_dir / "visual_summary.jpg"
-        combined_path = write_combined_report(
-            session_dir,
-            session_id,
-            visual_summary if visual_summary.exists() else None,
-            report_md,
-            feedback_lines,
-            target_details=details,
-            feedback_map=feedback_map,
-        )
-        insert_artifact(runner.db_path, session_id, "report", "feedback_summary", feedback_path)
-        insert_artifact(runner.db_path, session_id, "report", "combined_report_with_feedback", combined_path)
-        return (
-            "Kaydedildi:\n"
-            + "\n".join(saved)
-            + f"\n\nFeedback: {feedback_path}"
-            + f"\nBirlesik rapor: {combined_path}"
-            + f"\nDB: {runner.db_path}"
-        )
+        (session_dir / "feedback_summary.md").write_text("# Puan ve Yorum Ozeti\n\n" + "\n".join(lines) + "\n", encoding="utf-8")
+        combined = write_combined_report(session_dir, session_id, session_dir / "visual_summary.jpg", list(details or []), feedback_map)
+        return f"Kaydedildi.\nBirlesik rapor: {combined}\nDB: {runner.db_path}"
 
     with gr.Blocks(title="Lejanter Evaluation Interface") as app:
         gr.Markdown("# Lejanter Evaluation Interface")
-        gr.Markdown("Resim yukle, modelleri calistir, raporlari gor, puan ve yorumlari Drive SQLite DB'ye kaydet.")
+        gr.Markdown("Tum deneyler varsayilan olarak acik. Gorseller yazisiz uretilir; renk cetveli ayri gorsel olarak kaydedilir.")
         session_state = gr.State("")
-        feedback_targets_state = gr.State([])
-        target_details_state = gr.State([])
+        targets_state = gr.State([])
+        details_state = gr.State([])
         with gr.Row():
             with gr.Column(scale=1):
                 image = gr.Image(label="Test image", type="filepath")
                 gr.Markdown(f"**OpenAI API key:** {api_key_status}")
-                manual_api_key = gr.Textbox(
-                    label="OpenAI API key manuel yedek",
-                    type="password",
-                    placeholder="Bos birak: Colab Secrets OPENAI_API_KEY kullanilir",
-                )
+                manual_api_key = gr.Textbox(label="OpenAI API key manuel yedek", type="password", placeholder="Bos birak: Colab Secrets OPENAI_API_KEY kullanilir")
                 vlm_model = gr.Dropdown(label="VLM model", choices=VLM_MODELS, value="gpt-4o", allow_custom_value=True)
-                gr.Markdown("### Model ciktilari")
                 run_v1 = gr.Checkbox(label="YOLO v1", value=True)
                 run_v2 = gr.Checkbox(label="YOLO v2", value=True)
                 run_v3 = gr.Checkbox(label="YOLO v3", value=True)
                 run_hybrid = gr.Checkbox(label="SAM2 / Hybrid YOLO + SAM2", value=True)
-                gr.Markdown("### VLM rapor tipleri")
-                vlm_image_only = gr.Checkbox(label="Sadece resmi VLM'e ver", value=False)
-                vlm_yolo = gr.Checkbox(label="Resim + YOLO sonuclarini VLM'e ver", value=False)
-                vlm_sam = gr.Checkbox(label="Resim + SAM2 sonucunu VLM'e ver", value=False)
-                vlm_hybrid = gr.Checkbox(label="Resim + YOLO + SAM2 hibrit sonucu VLM'e ver", value=False)
+                visual_style = gr.Dropdown(label="Gorsel cizim modu", choices=[("Segmentasyon, yazisiz", "mask_only"), ("Sadece kare/kutu, yazisiz", "box_only"), ("Kucuk etiketler", "small_labels"), ("Orijinal buyuk YOLO etiketleri", "original_labels")], value="mask_only")
+                vlm_image_only = gr.Checkbox(label="Sadece resmi VLM'e ver", value=True)
+                vlm_yolo = gr.Checkbox(label="Resim + YOLO sonuclarini VLM'e ver", value=True)
+                vlm_sam = gr.Checkbox(label="Resim + SAM2 sonucunu VLM'e ver", value=True)
+                vlm_hybrid = gr.Checkbox(label="Resim + YOLO + SAM2 hibrit sonucu VLM'e ver", value=True)
                 run_button = gr.Button("Run evaluation", variant="primary")
             with gr.Column(scale=2):
                 gallery = gr.Gallery(label="Result visuals", columns=2, height=520)
@@ -720,43 +501,52 @@ def build_app(runner: EvaluationRunner):
                     report = gr.Markdown(label="Reports")
                 db_path = gr.Textbox(label="SQLite DB path")
                 debug_log = gr.Textbox(label="Terminal / Debug log", lines=18, autoscroll=True)
-
-        gr.Markdown("## Sonuc Sekmeleri, Puan ve Yorum")
-        gr.Markdown("Ustte toplu gorsel kalsin; burada her cikti ayri sekmede incelenir. Kaydet'e basinca rapor puan/yorumlarla yeniden yazilir.")
+        gr.Markdown("## Sonuc Sekmeleri, Yildiz Puani ve Yorum")
         feedback_components = []
         with gr.Tabs():
-            for index in range(feedback_slots):
-                with gr.Tab(f"Sonuc {index + 1}", visible=False) as result_tab:
+            for i in range(feedback_slots):
+                with gr.Tab(f"Sonuc {i + 1}", visible=False) as tab:
                     label = gr.Markdown()
-                    result_image = gr.Image(label="Cikti gorseli", type="filepath", height=360)
-                    result_content = gr.Markdown()
-                    score = gr.Slider(label="Puan (0 = no feedback, 1-5 = degerlendirme)", minimum=0, maximum=5, step=1, value=0)
-                    comment = gr.Textbox(label="Yorum (opsiyonel)", lines=3)
-                    feedback_components.extend([result_tab, label, result_image, result_content, score, comment])
+                    out_img = gr.Image(label="Cikti gorseli", type="filepath", height=360)
+                    content = gr.Markdown()
+                    score = gr.Radio(label="Yildiz puani", choices=star_choices, value=0)
+                    comment = gr.Textbox(label="Yorum", lines=3)
+                    feedback_components.extend([tab, label, out_img, content, score, comment])
         save_button = gr.Button("Tum puan/yorumlari kaydet")
         save_status = gr.Textbox(label="Save status")
-
-        run_button.click(
-            run_clicked,
-            inputs=[
-                image,
-                manual_api_key,
-                vlm_model,
-                run_v1,
-                run_v2,
-                run_v3,
-                run_hybrid,
-                vlm_image_only,
-                vlm_yolo,
-                vlm_sam,
-                vlm_hybrid,
-            ],
-            outputs=[session_state, gallery, report, db_path, debug_log, feedback_targets_state, target_details_state, *feedback_components],
-        )
-        save_inputs = [session_state, feedback_targets_state, target_details_state]
-        for index in range(feedback_slots):
-            save_inputs.extend([feedback_components[index * 6 + 4], feedback_components[index * 6 + 5]])
-        save_button.click(save_all_feedback_clicked, inputs=save_inputs, outputs=[save_status])
+        gr.Markdown("## LLM Rapor Karsilastirma")
+        llm_cards = []
+        with gr.Row():
+            for _ in range(4):
+                with gr.Column(scale=1, visible=False) as group:
+                    card = gr.Markdown()
+                    score = gr.Radio(label="Yildiz puani", choices=star_choices, value=0)
+                    comment = gr.Textbox(label="Yorum", lines=3)
+                    llm_cards.extend([group, card, score, comment])
+        gr.Markdown("## Secili Sonuclari Karsilastir")
+        compare_selector = gr.CheckboxGroup(label="Karsilastirilacak ciktilar", choices=[], value=[], visible=False)
+        compare_slots = []
+        with gr.Row():
+            for i in range(4):
+                compare_slots.append(gr.Dropdown(label=f"Kart {i + 1}", choices=[], value=None, visible=False))
+        compare_button = gr.Button("Secilenleri karsilastir")
+        compare_components = []
+        for _ in range(2):
+            with gr.Row():
+                for _ in range(2):
+                    with gr.Column(scale=1, visible=False) as group:
+                        label = gr.Markdown()
+                        img = gr.Image(label="Gorsel", type="filepath", height=300)
+                        md = gr.Markdown()
+                        compare_components.extend([group, label, img, md])
+        run_button.click(run_clicked, inputs=[image, manual_api_key, vlm_model, run_v1, run_v2, run_v3, run_hybrid, vlm_image_only, vlm_yolo, vlm_sam, vlm_hybrid, visual_style], outputs=[session_state, gallery, report, db_path, debug_log, targets_state, details_state, *feedback_components, *llm_cards, compare_selector, *compare_slots])
+        compare_button.click(compare_selected, inputs=[compare_selector, details_state, *compare_slots], outputs=compare_components)
+        save_inputs = [session_state, targets_state, details_state]
+        for i in range(feedback_slots):
+            save_inputs.extend([feedback_components[i * 6 + 4], feedback_components[i * 6 + 5]])
+        for i in range(4):
+            save_inputs.extend([llm_cards[i * 4 + 2], llm_cards[i * 4 + 3]])
+        save_button.click(save_feedback, inputs=save_inputs, outputs=[save_status])
     return app
 
 
@@ -779,23 +569,8 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     db_path = args.db_path or args.reports_dir / "evaluation_sessions" / "ratings.sqlite"
-    runner = LiveEvaluationRunner(
-        project_dir=args.project_dir.resolve(),
-        reports_dir=args.reports_dir.resolve(),
-        weights_dir=args.weights_dir.resolve(),
-        db_path=db_path.resolve(),
-        yolo_device=args.yolo_device or args.device,
-        sam2_device=args.sam2_device,
-        sam2_dir=args.sam2_dir.resolve() if args.sam2_dir else None,
-        sam2_checkpoint=args.sam2_checkpoint.resolve() if args.sam2_checkpoint else None,
-        sam2_model_cfg=args.sam2_model_cfg,
-    )
-    app = build_app(runner)
-    app.launch(
-        share=args.share,
-        debug=True,
-        allowed_paths=[str(args.project_dir.resolve()), str(args.reports_dir.resolve()), "/tmp"],
-    )
+    runner = LiveEvaluationRunner(args.project_dir.resolve(), args.reports_dir.resolve(), args.weights_dir.resolve(), db_path.resolve(), args.yolo_device or args.device, args.sam2_device, args.sam2_dir.resolve() if args.sam2_dir else None, args.sam2_checkpoint.resolve() if args.sam2_checkpoint else None, args.sam2_model_cfg)
+    build_app(runner).launch(share=args.share, debug=True, allowed_paths=[str(args.project_dir.resolve()), str(args.reports_dir.resolve()), "/tmp"])
 
 
 if __name__ == "__main__":
