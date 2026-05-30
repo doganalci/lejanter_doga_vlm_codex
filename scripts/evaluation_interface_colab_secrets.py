@@ -1,11 +1,36 @@
 from __future__ import annotations
 
 import argparse
+import datetime as dt
+import json
 import os
+import queue
+import shutil
+import subprocess
+import sys
+import threading
+import time
 import traceback
+import uuid
 from pathlib import Path
+from typing import Any
 
-from evaluation_interface import EvaluationRunner, VLM_MODELS, insert_rating
+from evaluation_interface import (
+    EvaluationRunner,
+    VLM_MODELS,
+    call_vlm,
+    detection_counts,
+    find_weight,
+    first_visual,
+    insert_artifact,
+    insert_rating,
+    insert_session,
+    make_report_payload,
+    make_yolo_payload,
+    normalize_input_image,
+    one_record,
+    save_vlm_report,
+)
 
 
 def get_openai_api_key() -> tuple[str, str]:
@@ -22,6 +47,285 @@ def get_openai_api_key() -> tuple[str, str]:
     except Exception:
         pass
     return "", "OPENAI_API_KEY bulunamadi. Colab Secrets'ta OPENAI_API_KEY ekleyip Notebook access'i ac."
+
+
+def live_run_command(command: list[str], cwd: Path, log_callback: Any | None = None) -> str:
+    command_text = " ".join(command)
+    if log_callback:
+        log_callback(f"$ {command_text}")
+    process = subprocess.Popen(
+        command,
+        cwd=cwd,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        bufsize=1,
+    )
+    lines: list[str] = []
+    assert process.stdout is not None
+    for line in process.stdout:
+        clean = line.rstrip()
+        lines.append(clean)
+        if log_callback and clean:
+            log_callback(clean)
+    return_code = process.wait()
+    output = "\n".join(lines)
+    if return_code != 0:
+        raise RuntimeError(f"Command failed: {command_text}\n{output}")
+    return output
+
+
+class LiveEvaluationRunner(EvaluationRunner):
+    def run_yolo_live(
+        self,
+        session_id: str,
+        session_dir: Path,
+        image_path: Path,
+        alias: str,
+        conf: float,
+        log_callback: Any | None = None,
+    ) -> dict[str, Any]:
+        weight = find_weight(self.weights_dir, alias)
+        model_dir = session_dir / alias
+        model_dir.mkdir(parents=True, exist_ok=True)
+        if weight is None:
+            return {"name": alias, "status": "missing weight", "visual": None, "json": None}
+        out_json = model_dir / "detections.json"
+        run_name = alias
+        project = model_dir / "runs"
+        command = [
+            sys.executable,
+            "scripts/infer_yolo.py",
+            "--weights",
+            str(weight),
+            "--source",
+            str(image_path),
+            "--task",
+            "segment",
+            "--conf",
+            str(conf),
+            "--out",
+            str(out_json),
+            "--name",
+            run_name,
+            "--project",
+            str(project),
+            "--save-visuals",
+        ]
+        if self.yolo_device:
+            command.extend(["--device", self.yolo_device])
+        live_run_command(command, self.project_dir, log_callback=log_callback)
+        visual = first_visual(project / run_name)
+        if visual:
+            shutil.copy2(visual, model_dir / visual.name)
+            visual = model_dir / visual.name
+        metadata = {"weight": str(weight), "conf": conf}
+        insert_artifact(self.db_path, session_id, "json", f"{alias}_json", out_json, metadata)
+        if visual:
+            insert_artifact(self.db_path, session_id, "image", f"{alias}_visual", visual, metadata)
+        return {"name": alias, "status": "ok", "visual": visual, "json": out_json}
+
+    def run_hybrid_live(
+        self,
+        session_id: str,
+        session_dir: Path,
+        image_path: Path,
+        log_callback: Any | None = None,
+    ) -> dict[str, Any]:
+        hybrid_dir = session_dir / "hybrid_yolo_sam2"
+        hybrid_dir.mkdir(parents=True, exist_ok=True)
+        raw = self.run_yolo_live(session_id, session_dir, image_path, "yolo_v3_no_erasing", conf=0.25, log_callback=log_callback)
+        raw_json = raw.get("json")
+        if not raw_json:
+            return {"name": "hybrid_yolo_sam2", "status": "missing yolo_v3", "visual": None, "json": None}
+        filtered_json = hybrid_dir / "yolo_filtered_conf078.json"
+        live_run_command(
+            [
+                sys.executable,
+                "scripts/filter_detections.py",
+                "--input",
+                str(raw_json),
+                "--out",
+                str(filtered_json),
+                "--default-conf",
+                "0.78",
+                "--class-threshold",
+                "cam=0.82",
+                "--class-threshold",
+                "ahsap_dograma=0.78",
+                "--class-threshold",
+                "camur_harc=0.72",
+                "--min-area-ratio",
+                "0.00005",
+                "--max-area-ratio",
+                "0.35",
+                "--nms-iou",
+                "0.25",
+            ],
+            self.project_dir,
+            log_callback=log_callback,
+        )
+        insert_artifact(self.db_path, session_id, "json", "hybrid_filtered_json", filtered_json)
+        if not self.sam2_dir or not self.sam2_dir.exists() or not self.sam2_checkpoint or not self.sam2_checkpoint.exists():
+            return {"name": "hybrid_yolo_sam2", "status": "filtered only; SAM2 not installed", "visual": raw.get("visual"), "json": filtered_json}
+        hybrid_json = hybrid_dir / "hybrid_yolo_sam2.json"
+        visual_dir = hybrid_dir / "visuals"
+        live_run_command(
+            [
+                sys.executable,
+                str(self.project_dir / "scripts/refine_with_sam2.py"),
+                "--detections",
+                str(filtered_json),
+                "--checkpoint",
+                str(self.sam2_checkpoint),
+                "--model-cfg",
+                self.sam2_model_cfg,
+                "--out",
+                str(hybrid_json),
+                "--visual-dir",
+                str(visual_dir),
+                "--device",
+                self.sam2_device or "cuda",
+            ],
+            self.sam2_dir,
+            log_callback=log_callback,
+        )
+        visual = first_visual(visual_dir)
+        insert_artifact(self.db_path, session_id, "json", "hybrid_yolo_sam2_json", hybrid_json)
+        if visual:
+            insert_artifact(self.db_path, session_id, "image", "hybrid_yolo_sam2_visual", visual)
+        return {"name": "hybrid_yolo_sam2", "status": "ok", "visual": visual, "json": hybrid_json, "raw_json": raw_json}
+
+    def run_session(
+        self,
+        image_file: str,
+        api_key: str,
+        vlm_model: str,
+        run_v1: bool,
+        run_v2: bool,
+        run_v3: bool,
+        run_hybrid: bool,
+        vlm_image_only: bool,
+        vlm_yolo: bool,
+        vlm_sam: bool,
+        vlm_hybrid: bool,
+        log_callback: Any | None = None,
+    ) -> tuple[str, list[tuple[str, str]], str, str, list[str], str]:
+        debug_log: list[str] = []
+
+        def emit(message: str) -> None:
+            debug_log.append(message)
+            if log_callback:
+                log_callback(message)
+
+        session_id = f"session_{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+        session_dir = self.reports_dir / "evaluation_sessions" / session_id
+        emit(f"Session: {session_id}")
+        emit(f"Session dir: {session_dir}")
+        image_path = normalize_input_image(image_file, session_dir / "input")
+        emit(f"Input image: {image_path}")
+        insert_session(self.db_path, session_id, image_path, session_dir)
+        insert_artifact(self.db_path, session_id, "image", "input", image_path)
+
+        results: list[dict[str, Any]] = []
+        if run_v1:
+            emit("YOLO v1 basliyor...")
+            result = self.run_yolo_live(session_id, session_dir, image_path, "yolo_v1_default", conf=0.25, log_callback=emit)
+            results.append(result)
+            emit(f"YOLO v1: {result['status']} json={result.get('json')} visual={result.get('visual')}")
+        if run_v2:
+            emit("YOLO v2 basliyor...")
+            result = self.run_yolo_live(session_id, session_dir, image_path, "yolo_v2_aug_controlled", conf=0.25, log_callback=emit)
+            results.append(result)
+            emit(f"YOLO v2: {result['status']} json={result.get('json')} visual={result.get('visual')}")
+        if run_v3:
+            emit("YOLO v3 basliyor...")
+            result = self.run_yolo_live(session_id, session_dir, image_path, "yolo_v3_no_erasing", conf=0.25, log_callback=emit)
+            results.append(result)
+            emit(f"YOLO v3: {result['status']} json={result.get('json')} visual={result.get('visual')}")
+
+        hybrid_result = None
+        if run_hybrid or vlm_sam or vlm_hybrid:
+            emit("Hybrid YOLO+SAM2 basliyor...")
+            hybrid_result = self.run_hybrid_live(session_id, session_dir, image_path, log_callback=emit)
+            emit(f"Hybrid YOLO+SAM2: {hybrid_result['status']} json={hybrid_result.get('json')} visual={hybrid_result.get('visual')}")
+            if run_hybrid:
+                results.append(hybrid_result)
+
+        reports_md = ["# Evaluation Results", "", f"Session: `{session_id}`", ""]
+        gallery: list[tuple[str, str]] = [(str(image_path), "input")]
+        target_names = ["overall"]
+        for result in results:
+            reports_md.append(f"## {result['name']}")
+            reports_md.append(f"Status: {result['status']}")
+            if result.get("json"):
+                counts = detection_counts(one_record(result["json"]))
+                reports_md.append(f"Detections: `{json.dumps(counts, ensure_ascii=False)}`")
+            reports_md.append("")
+            if result.get("visual"):
+                gallery.append((str(result["visual"]), result["name"]))
+            target_names.append(result["name"])
+
+        if any([vlm_image_only, vlm_yolo, vlm_sam, vlm_hybrid]):
+            emit("VLM raporlama basliyor...")
+            assisted_payload = make_report_payload(
+                raw_json=hybrid_result.get("raw_json") if hybrid_result else None,
+                filtered_json=(session_dir / "hybrid_yolo_sam2" / "yolo_filtered_conf078.json"),
+                hybrid_json=hybrid_result.get("json") if hybrid_result else None,
+            )
+            yolo_payload = make_yolo_payload(results)
+            vlm_dir = session_dir / "vlm_reports"
+            vlm_dir.mkdir(parents=True, exist_ok=True)
+            if vlm_image_only:
+                emit("VLM image-only raporu uretiliyor...")
+                image_only = call_vlm(image_path, "Bu cephe gorselini mimari cephe lejant raporu olarak yorumla. Sayilari tahminse belirt.", api_key=api_key, model=vlm_model)
+                save_vlm_report(self.db_path, session_id, vlm_dir, "vlm_image_only", image_only)
+                reports_md.extend(["## VLM - Sadece Gorsel", image_only, ""])
+                target_names.append("vlm_image_only")
+            if vlm_yolo:
+                emit("VLM YOLO destekli rapor uretiliyor...")
+                yolo_report = call_vlm(
+                    image_path,
+                    "Bu gorsel ve asagidaki YOLO model ciktilarina gore mimari cephe lejant raporu yaz. Sayi olarak sadece total_detections ve class_counts alanlarini kullan. YOLO versiyonlarini kisa karsilastir.\n\n"
+                    + json.dumps(yolo_payload, ensure_ascii=False, indent=2),
+                    api_key=api_key,
+                    model=vlm_model,
+                )
+                save_vlm_report(self.db_path, session_id, vlm_dir, "vlm_yolo_assisted", yolo_report, yolo_payload)
+                reports_md.extend(["## VLM - YOLO Ozetli", yolo_report, ""])
+                target_names.append("vlm_yolo_assisted")
+            if vlm_sam:
+                emit("VLM SAM2 destekli rapor uretiliyor...")
+                sam_payload = {"instruction": "Use hybrid_yolo_sam2 counts as the SAM2-refined mask result. SAM2 is prompted by YOLO boxes.", "sam2_refined": assisted_payload["hybrid_yolo_sam2"]}
+                sam_report = call_vlm(
+                    image_path,
+                    "Bu gorsel ve SAM2 ile iyilestirilmis maske ozetine gore cephe lejant raporu yaz. SAM2 sonucunun YOLO kutulari ile yonlendirildigini belirt. Sayi olarak sadece total_detections ve class_counts alanlarini kullan.\n\n"
+                    + json.dumps(sam_payload, ensure_ascii=False, indent=2),
+                    api_key=api_key,
+                    model=vlm_model,
+                )
+                save_vlm_report(self.db_path, session_id, vlm_dir, "vlm_sam2_assisted", sam_report, sam_payload)
+                reports_md.extend(["## VLM - SAM2 Ozetli", sam_report, ""])
+                target_names.append("vlm_sam2_assisted")
+            if vlm_hybrid:
+                emit("VLM hybrid raporu uretiliyor...")
+                hybrid_report = call_vlm(
+                    image_path,
+                    "Bu gorsel ve asagidaki YOLO + SAM2 hibrit ozetine gore teknik mimari cephe lejant raporu yaz. Raw YOLO, filtrelenmis YOLO ve SAM2 ile iyilestirilmis sonucu ayri ayri yorumla. Sayi olarak sadece total_detections ve class_counts alanlarini kullan.\n\n"
+                    + json.dumps(assisted_payload, ensure_ascii=False, indent=2),
+                    api_key=api_key,
+                    model=vlm_model,
+                )
+                save_vlm_report(self.db_path, session_id, vlm_dir, "vlm_hybrid_yolo_sam2", hybrid_report, assisted_payload)
+                reports_md.extend(["## VLM - YOLO + SAM2 Hibrit", hybrid_report, ""])
+                target_names.append("vlm_hybrid_yolo_sam2")
+
+        summary_path = session_dir / "session_summary.md"
+        summary_path.write_text("\n".join(reports_md), encoding="utf-8")
+        insert_artifact(self.db_path, session_id, "report", "session_summary", summary_path)
+        emit(f"Summary: {summary_path}")
+        emit(f"SQLite DB: {self.db_path}")
+        return session_id, gallery, "\n".join(reports_md), str(self.db_path), target_names, "\n".join(debug_log)
 
 
 def build_app(runner: EvaluationRunner):
@@ -44,24 +348,62 @@ def build_app(runner: EvaluationRunner):
     ):
         if image_file is None:
             raise gr.Error("Once bir gorsel yukle.")
-        try:
-            session_id, gallery, report, db_path, targets, debug_log = runner.run_session(
-                image_file=image_file,
-                api_key=(manual_api_key or "").strip() or auto_api_key,
-                vlm_model=vlm_model or "gpt-4o",
-                run_v1=run_v1,
-                run_v2=run_v2,
-                run_v3=run_v3,
-                run_hybrid=run_hybrid,
-                vlm_image_only=vlm_image_only,
-                vlm_yolo=vlm_yolo,
-                vlm_sam=vlm_sam,
-                vlm_hybrid=vlm_hybrid,
-            )
-            return session_id, gallery, report, db_path, debug_log, gr.update(choices=targets, value="overall")
-        except Exception as exc:
-            error_text = f"## Hata\n\n```text\n{exc}\n\n{traceback.format_exc()}\n```"
-            return "", [], error_text, str(runner.db_path), traceback.format_exc(), gr.update(choices=["overall"], value="overall")
+        log_queue: queue.Queue[str] = queue.Queue()
+        result_box: dict[str, object] = {}
+
+        def emit(message: str) -> None:
+            log_queue.put(message)
+
+        def worker() -> None:
+            try:
+                result_box["value"] = runner.run_session(
+                    image_file=image_file,
+                    api_key=(manual_api_key or "").strip() or auto_api_key,
+                    vlm_model=vlm_model or "gpt-4o",
+                    run_v1=run_v1,
+                    run_v2=run_v2,
+                    run_v3=run_v3,
+                    run_hybrid=run_hybrid,
+                    vlm_image_only=vlm_image_only,
+                    vlm_yolo=vlm_yolo,
+                    vlm_sam=vlm_sam,
+                    vlm_hybrid=vlm_hybrid,
+                    log_callback=emit,
+                )
+            except Exception as exc:
+                result_box["error"] = f"{exc}\n\n{traceback.format_exc()}"
+
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+        logs = ["Calisma basladi. Terminal akisindan sureci izleyebilirsin."]
+        yield "", [], "## Calisiyor\n\nModel ve rapor uretimi devam ediyor.", str(runner.db_path), "\n".join(logs), gr.update(choices=["overall"], value="overall")
+
+        while thread.is_alive():
+            while True:
+                try:
+                    logs.append(log_queue.get_nowait())
+                except queue.Empty:
+                    break
+            yield "", [], "## Calisiyor\n\nModel ve rapor uretimi devam ediyor.", str(runner.db_path), "\n".join(logs[-250:]), gr.update(choices=["overall"], value="overall")
+            time.sleep(0.5)
+
+        while True:
+            try:
+                logs.append(log_queue.get_nowait())
+            except queue.Empty:
+                break
+
+        if "error" in result_box:
+            error_text = f"## Hata\n\n```text\n{result_box['error']}\n```"
+            logs.append("Hata olustu. Ayrinti yukaridaki traceback icinde.")
+            yield "", [], error_text, str(runner.db_path), "\n".join(logs[-300:]), gr.update(choices=["overall"], value="overall")
+            return
+
+        session_id, gallery, report, db_path, targets, debug_log = result_box["value"]  # type: ignore[misc]
+        logs.append("Calisma tamamlandi.")
+        if debug_log:
+            logs.extend(str(debug_log).splitlines())
+        yield session_id, gallery, report, db_path, "\n".join(logs[-300:]), gr.update(choices=targets, value="overall")
 
     def save_rating_clicked(session_id, target_name, score, comment):
         if not session_id:
@@ -98,7 +440,7 @@ def build_app(runner: EvaluationRunner):
                 gallery = gr.Gallery(label="Result visuals", columns=2, height=520)
                 report = gr.Markdown(label="Reports")
                 db_path = gr.Textbox(label="SQLite DB path")
-                debug_log = gr.Textbox(label="Debug log", lines=12)
+                debug_log = gr.Textbox(label="Terminal / Debug log", lines=18, autoscroll=True)
 
         gr.Markdown("## Rating")
         with gr.Row():
@@ -148,7 +490,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     db_path = args.db_path or args.reports_dir / "evaluation_sessions" / "ratings.sqlite"
-    runner = EvaluationRunner(
+    runner = LiveEvaluationRunner(
         project_dir=args.project_dir.resolve(),
         reports_dir=args.reports_dir.resolve(),
         weights_dir=args.weights_dir.resolve(),
